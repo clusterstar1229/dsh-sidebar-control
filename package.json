@@ -1,6 +1,6 @@
 {
   "name": "dsh-sidebar-control",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Agent control for DeepSeek Harness's built-in right-Sidebar Browser: snapshot refs, click/type/press/select/scroll, screenshots, multi-tab, plus query-scoped reads and change diffs that keep long pages cheap.",
   "type": "module",
   "main": "index.js",
