@@ -42,18 +42,18 @@ The query read for "存款" returned one matching line where the full text was t
 ## Install
 
 ```bash
-dsh plugin --profile desktop add dsh-sidebar-control@0.1.2
+dsh plugin --profile desktop add dsh-sidebar-control@0.1.3
 ```
 
-or in the app: **Settings → Plugins → Install bundle** → `dsh-sidebar-control@0.1.2`.
+or in the app: **Settings → Plugins → Install bundle** → `dsh-sidebar-control@0.1.3`.
 
 An npm install gives the Plugin Manager an **Update** button for later releases. Prefer a checkout?
-Use `github:clusterstar1229/dsh-sidebar-control#v0.1.2` instead.
+Use `github:clusterstar1229/dsh-sidebar-control#v0.1.3` instead.
 
 Requirements: **DeepSeek Harness Desktop** 0.2.2-rc.1 (the Browser panel must be the Electron
 `<webview>` carrier), Node 20+, and the built-in sidebar Browser enabled.
 
-**Compatibility:** version 0.1.1 is tested against DSH **0.2.2-rc.1**, the current desktop release;
+**Compatibility:** version 0.1.3 is tested against DSH **0.2.2-rc.1**, the current desktop release;
 `engines.dsh` allows the whole 0.2.x line.
 
 ## Use
@@ -108,7 +108,8 @@ change, or just use `diff` when you only need to know what changed.
 ## Related work
 
 - [`dsh-sidebar-browser`](https://www.npmjs.com/package/dsh-sidebar-browser) — the MIT implementation this
-  package builds on.
+  package builds on (Copyright (c) 2026 The dsh-sidebar-browser authors); the `read`/`diff`/`tabs` additions
+  are this package's own work.
 - [`dsh-sidebar-browser-agent`](https://github.com/Hesitate-P/dsh-sidebar-browser-agent) — a broader
   native-input implementation with tabs, tests and config switches.
 
@@ -156,18 +157,18 @@ Agent 直接操作你正在看的那个 Browser 面板——读真实页面、�
 ### 安装
 
 ```bash
-dsh plugin --profile desktop add dsh-sidebar-control@0.1.2
+dsh plugin --profile desktop add dsh-sidebar-control@0.1.3
 ```
 
-或在应用里：**设置 → 插件 → 安装 bundle** → `dsh-sidebar-control@0.1.2`。
+或在应用里：**设置 → 插件 → 安装 bundle** → `dsh-sidebar-control@0.1.3`。
 
 从 npm 安装后，插件管理器会为后续版本提供 **Update** 按钮。想用仓库源码，也可以改用
-`github:clusterstar1229/dsh-sidebar-control#v0.1.2`。
+`github:clusterstar1229/dsh-sidebar-control#v0.1.3`。
 
 要求：**DeepSeek Harness 桌面版** 0.2.2-rc.1（右栏浏览器必须是 Electron `<webview>` 载体）、Node 20+，
 并已启用内置侧栏浏览器。
 
-**兼容性：** 0.1.1 已在当前桌面版 DSH **0.2.2-rc.1** 上实测通过；`engines.dsh` 允许整个 0.2.x 线。
+**兼容性：** 0.1.3 已在当前桌面版 DSH **0.2.2-rc.1** 上实测通过；`engines.dsh` 允许整个 0.2.x 线。
 
 ### 用法
 
@@ -214,7 +215,8 @@ refs 来自最近一次快照，导航后会失效——页面变了就重新 `s
 
 ### 相关项目
 
-- [`dsh-sidebar-browser`](https://www.npmjs.com/package/dsh-sidebar-browser) — 本项目的 MIT 基础实现。
+- [`dsh-sidebar-browser`](https://www.npmjs.com/package/dsh-sidebar-browser) — 本项目的 MIT 基础实现
+  （Copyright (c) 2026 The dsh-sidebar-browser authors）；`read`/`diff`/`tabs` 等增量为本项目原创。
 - [`dsh-sidebar-browser-agent`](https://github.com/Hesitate-P/dsh-sidebar-browser-agent) — 更全面的原生输入实现（标签页、测试、配置开关）。
 
 ### 反馈
