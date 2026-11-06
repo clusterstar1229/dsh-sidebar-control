@@ -37,10 +37,13 @@ The query read for "存款" returned one matching line where the full text was t
 ## Install
 
 ```bash
-dsh plugin --profile desktop add dsh-sidebar-control
+dsh plugin --profile desktop add github:clusterstar1229/dsh-sidebar-control#v0.1.0
 ```
 
-or in the app: **Settings → Plugins → Install bundle** → `dsh-sidebar-control@0.1.0`.
+or in the app: **Settings → Plugins → Install bundle** → `github:clusterstar1229/dsh-sidebar-control#v0.1.0`.
+
+The plugin is published from this GitHub repository; there is no npm package yet, so use the `github:` spec
+above (or install the checkout by absolute path while developing).
 
 Requirements: **DeepSeek Harness Desktop** 0.2.2-rc.1 (the Browser panel must be the Electron
 `<webview>` carrier), Node 20+, and the built-in sidebar Browser enabled.
@@ -143,10 +146,12 @@ Agent 直接操作你正在看的那个 Browser 面板——读真实页面、�
 ### 安装
 
 ```bash
-dsh plugin --profile desktop add dsh-sidebar-control
+dsh plugin --profile desktop add github:clusterstar1229/dsh-sidebar-control#v0.1.0
 ```
 
-或在应用里：**设置 → 插件 → 安装 bundle** → `dsh-sidebar-control@0.1.0`。
+或在应用里：**设置 → 插件 → 安装 bundle** → `github:clusterstar1229/dsh-sidebar-control#v0.1.0`。
+
+插件从 GitHub 仓库发布，暂时没有 npm 包，请使用上面的 `github:` 规格（开发时也可以按绝对路径安装）。
 
 要求：**DeepSeek Harness 桌面版** 0.2.2-rc.1（右栏浏览器必须是 Electron `<webview>` 载体）、Node 20+，
 并已启用内置侧栏浏览器。
