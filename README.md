@@ -10,6 +10,8 @@ presses keys, scrolls, waits and takes screenshots inside the panel the person i
 > its action surface and long-poll bridge are reused. This package adds **query-scoped reads**, **change
 > diffs** and **multi-tab management**, and keeps the whole thing dependency-free.
 
+**If this saves you tokens, please [Star the repository](https://github.com/clusterstar1229/dsh-sidebar-control) ⭐**
+
 ## Why this one
 
 Most sidebar-browser plugins answer a page with one big snapshot. That is fine once, and expensive three
@@ -37,16 +39,19 @@ The query read for "存款" returned one matching line where the full text was t
 ## Install
 
 ```bash
-dsh plugin --profile desktop add github:clusterstar1229/dsh-sidebar-control#v0.1.0
+dsh plugin --profile desktop add github:clusterstar1229/dsh-sidebar-control#v0.1.1
 ```
 
-or in the app: **Settings → Plugins → Install bundle** → `github:clusterstar1229/dsh-sidebar-control#v0.1.0`.
+or in the app: **Settings → Plugins → Install bundle** → `github:clusterstar1229/dsh-sidebar-control#v0.1.1`.
 
 The plugin is published from this GitHub repository; there is no npm package yet, so use the `github:` spec
 above (or install the checkout by absolute path while developing).
 
 Requirements: **DeepSeek Harness Desktop** 0.2.2-rc.1 (the Browser panel must be the Electron
 `<webview>` carrier), Node 20+, and the built-in sidebar Browser enabled.
+
+**Compatibility:** version 0.1.1 is tested against DSH **0.2.2-rc.1**, the current desktop release;
+`engines.dsh` allows the whole 0.2.x line.
 
 ## Use
 
@@ -123,6 +128,8 @@ Agent 直接操作你正在看的那个 Browser 面板——读真实页面、�
 > 本项目基于 MIT 许可的 [`dsh-sidebar-browser`](https://www.npmjs.com/package/dsh-sidebar-browser)，复用了它的
 > 动作设计与长轮询桥；在此基础上增加了**按问题检索的阅读**、**变化对比**和**多标签管理**，全程零依赖。
 
+**如果它帮你省了 token，欢迎[点个 Star](https://github.com/clusterstar1229/dsh-sidebar-control) ⭐**
+
 ### 差异点：第二次、第三次读页更便宜
 
 大多数侧栏浏览器插件用"一次大快照"回答所有问题——读一次可以，连读三次就很贵。这个插件专门优化后两次：
@@ -146,15 +153,17 @@ Agent 直接操作你正在看的那个 Browser 面板——读真实页面、�
 ### 安装
 
 ```bash
-dsh plugin --profile desktop add github:clusterstar1229/dsh-sidebar-control#v0.1.0
+dsh plugin --profile desktop add github:clusterstar1229/dsh-sidebar-control#v0.1.1
 ```
 
-或在应用里：**设置 → 插件 → 安装 bundle** → `github:clusterstar1229/dsh-sidebar-control#v0.1.0`。
+或在应用里：**设置 → 插件 → 安装 bundle** → `github:clusterstar1229/dsh-sidebar-control#v0.1.1`。
 
 插件从 GitHub 仓库发布，暂时没有 npm 包，请使用上面的 `github:` 规格（开发时也可以按绝对路径安装）。
 
 要求：**DeepSeek Harness 桌面版** 0.2.2-rc.1（右栏浏览器必须是 Electron `<webview>` 载体）、Node 20+，
 并已启用内置侧栏浏览器。
+
+**兼容性：** 0.1.1 已在当前桌面版 DSH **0.2.2-rc.1** 上实测通过；`engines.dsh` 允许整个 0.2.x 线。
 
 ### 用法
 
