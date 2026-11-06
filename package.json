@@ -1,0 +1,62 @@
+{
+  "name": "dsh-sidebar-control",
+  "version": "0.1.0",
+  "description": "Agent control for DeepSeek Harness's built-in right-Sidebar Browser: snapshot refs, click/type/press/select/scroll, screenshots, multi-tab, plus query-scoped reads and change diffs that keep long pages cheap.",
+  "type": "module",
+  "main": "index.js",
+  "icon": "./icon.svg",
+  "meta": {
+    "title": "Sidebar Control",
+    "description": "Let the agent drive DSH's built-in sidebar browser — with cheap reads and change diffs for long pages."
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.2-rc.1 <0.3.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "browser",
+    "browser-automation",
+    "sidebar",
+    "agent-tool",
+    "cordis",
+    "webview"
+  ],
+  "scripts": {
+    "check": "node --check index.js && node --check client.js",
+    "prepack": "npm run check"
+  }
+}

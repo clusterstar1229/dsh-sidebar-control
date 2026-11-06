@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Sidebar Control",
+    "description": "Lets the agent drive the right-Sidebar Browser, with query-scoped reads and change diffs that keep long pages cheap."
+  }
+}
