@@ -14,6 +14,9 @@ window.__ModuleLoader__.load({
     const POLL_WAIT_MS = 25000
     const FRAME_SELECTOR = 'webview[data-sidebar-browser-frame]'
     const LIST_LIMIT = 120
+    /* Actions a batch may contain. A batch is one tool call for several steps,
+       so it saves the model a round trip per step; it may not nest or open tabs. */
+    const BATCH_ACTIONS = new Set(['navigate', 'click', 'type', 'press', 'select', 'scroll', 'wait', 'eval', 'read', 'diff', 'snapshot'])
 
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -105,7 +108,8 @@ window.__ModuleLoader__.load({
         }
         refs.push(entry)
       }
-      const rawText = document.body === null ? '' : String(document.body.innerText || '')
+      const includeText = options.includeText !== false
+      const rawText = includeText && document.body !== null ? String(document.body.innerText || '') : ''
       const text = rawText.replace(/\n[ \t]+\n/g, '\n\n').replace(/\n{3,}/g, '\n\n').trim()
       return {
         url: String(location.href),
@@ -271,7 +275,7 @@ window.__ModuleLoader__.load({
       const query = String(options.query || '').trim()
       const budget = Number(options.maxChars) > 0 ? Math.min(Number(options.maxChars), 20000) : 4000
       const raw = document.body === null ? '' : String(document.body.innerText || '')
-      const paragraphs = raw.split(/\n{2,}/)
+      const paragraphs = raw.split(/\n+/)
         .map((part) => part.replace(/[ \t]+/g, ' ').trim())
         .filter((part) => part.length > 0)
         .slice(0, 800)
@@ -338,7 +342,7 @@ window.__ModuleLoader__.load({
     function pageDiff(options) {
       const budget = Number(options.maxChars) > 0 ? Math.min(Number(options.maxChars), 20000) : 4000
       const raw = document.body === null ? '' : String(document.body.innerText || '')
-      const paragraphs = raw.split(/\n{2,}/)
+      const paragraphs = raw.split(/\n+/)
         .map((part) => part.replace(/[ \t]+/g, ' ').trim())
         .filter((part) => part.length > 0)
         .slice(0, 800)
@@ -642,6 +646,44 @@ window.__ModuleLoader__.load({
       await sleep(150)
     }
 
+    /**
+     * Return as soon as the page stops changing instead of sleeping a fixed
+     * interval: a click that only focuses a field settles in about a tenth of a
+     * second, and a page that navigates settles when the address and the
+     * document stop moving. This is the latency difference a person feels when
+     * clicking through a form.
+     */
+    async function settleFast(frame, options) {
+      const budget = Number(options?.timeoutMs) > 0 ? Number(options.timeoutMs) : 2500
+      const quiet = Number(options?.quietMs) > 0 ? Number(options.quietMs) : 180
+      const floor = Number(options?.minMs) > 0 ? Number(options.minMs) : 80
+      const start = Date.now()
+      try {
+        await frame.executeJavaScript('(() => { if (!window.__dshScObs) { window.__dshScMutations = 0; window.__dshScObs = new MutationObserver(() => { window.__dshScMutations += 1 }); window.__dshScObs.observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true }) } return 1 })()', true)
+      } catch {
+        /* a page between documents keeps the polling fallback below */
+      }
+      let last = ''
+      let changedAt = start
+      while (Date.now() - start < budget) {
+        let probe = null
+        try {
+          probe = await frame.executeJavaScript('({ url: location.href, ready: document.readyState, n: window.__dshScMutations || 0, len: document.body ? document.body.innerText.length : 0 })', true)
+        } catch {
+          /* navigation in flight: poll again */
+        }
+        if (probe !== null && typeof probe === 'object') {
+          const signature = String(probe.url) + '|' + String(probe.ready) + '|' + String(probe.n) + '|' + String(probe.len)
+          if (signature !== last) {
+            last = signature
+            changedAt = Date.now()
+          }
+          if (probe.ready !== 'loading' && Date.now() - changedAt >= quiet && Date.now() - start >= floor) return
+        }
+        await sleep(60)
+      }
+    }
+
     async function navigateTo(frame, url) {
       try {
         await frame.loadURL(url)
@@ -710,7 +752,15 @@ window.__ModuleLoader__.load({
 
     async function capture(frame) {
       if (typeof frame.capturePage !== 'function') throw new Error('This Harness build does not expose capturePage on the Browser frame.')
-      const image = await frame.capturePage()
+      /* capturePage can never settle for an occluded guest; a deadline turns a
+         wedged call into an answer instead of a bridge stuck for minutes. */
+      let timer
+      const image = await Promise.race([
+        frame.capturePage(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('the screenshot did not finish within 10s — is the Harness window visible?')), 10000)
+        }),
+      ]).finally(() => clearTimeout(timer))
       if (image === undefined || image === null) throw new Error('The Browser frame returned no screenshot.')
       if (typeof image.isEmpty === 'function' && image.isEmpty()) throw new Error('The Browser frame returned an empty screenshot.')
       const dataUrl = String(image.toDataURL())
@@ -729,25 +779,43 @@ window.__ModuleLoader__.load({
 
       if (action === 'open') {
         const url = String(args.url || '')
-        let frame = pickFrame(state, ctx)
-        let visible = frame !== undefined
-        if (frame !== undefined) {
-          await frameReady(frame, 15000)
-          await navigateTo(frame, url)
-          try {
-            await revealFrame(ctx, frame)
-          } catch {
-            visible = false
+        const side = sidebarRightOf(ctx)
+        if (side === undefined || side === null) throw new Error('The right Sidebar is unavailable in this Harness page, so a Browser tab cannot be opened (Desktop app required).')
+        const existing = pickFrame(state, ctx)
+        /* A Browser tab already on screen is reused and navigated. A tab that is
+           hidden, or belongs to another Session, is not navigated: open a tab in
+           the current Session instead, which is what the person will see. */
+        if (existing !== undefined && frameIsVisible(existing)) {
+          await navigateTo(existing, url)
+          state.last = existing
+          return { text: 'Opened ' + url + '\n' + statusText(ctx) }
+        }
+        let opened
+        try {
+          opened = side.openTab('browser', { params: { url } })
+        } catch (error) {
+          throw new Error('Could not open the Browser tab: ' + (error instanceof Error ? error.message : String(error)))
+        }
+        if (opened !== undefined && opened !== null && typeof opened.then === 'function') {
+          await opened.catch(() => {})
+        }
+        /* Do not wait out a chain of long timeouts: a frame that appears does so
+           within a few seconds, and a missing one is reported instead of hanging
+           the tool call for a minute and a half. */
+        const deadline = Date.now() + 8000
+        while (Date.now() < deadline) {
+          const frame = pickFrame(state, ctx)
+          if (frame !== undefined) {
+            state.last = frame
+            await frameReady(frame, 5000).catch(() => {})
+            return { text: 'Opened ' + url + '\n' + statusText(ctx) }
           }
+          await sleep(150)
         }
-        if (!visible) {
-          await openBrowserTab(ctx, url)
-          const settled = await settleActiveFrame(state, ctx, undefined)
-          if (settled === undefined) throw new Error('The Browser tab was requested but no Browser frame appeared.')
-          frame = settled
+        return {
+          text: 'Requested a Browser tab at ' + url + ', but no frame appeared within 8s.\n'
+            + 'The tab may still be loading; call action "status" in a moment.\n' + statusText(ctx),
         }
-        state.last = frame
-        return { text: 'Opened ' + url + '\n' + statusText(ctx) }
       }
 
       const frame = await activeFrame(state, ctx, {})
@@ -782,6 +850,7 @@ window.__ModuleLoader__.load({
           const snapshot = await runPage(frame, pageSnapshot, {
             maxRefs: Number(args.max_refs) > 0 ? Math.min(Number(args.max_refs), LIST_LIMIT) : 80,
             maxTextChars: Number(args.max_text_chars) > 0 ? Number(args.max_text_chars) : 12000,
+            includeText: args.include_text !== false,
           })
           return { text: formatSnapshot(snapshot) }
         }
@@ -816,9 +885,14 @@ window.__ModuleLoader__.load({
           const active = safe(() => side.active())
           const rows = (Array.isArray(open) ? open : []).filter((tab) => tab.kind === 'browser')
           if (rows.length === 0) return { text: 'No Browser tab is open. Use action "open" with a url.' }
+          const activeId = active === undefined || active === null ? undefined : String(active.id)
           const lines = rows.map((tab) => {
-            const mark = active !== undefined && active !== null && active.id === tab.id ? '*' : ' '
-            return mark + ' ' + String(tab.id) + '  ' + String(tab.title || '') + '  ' + String(tab.url || '')
+            const id = String(tab.tabId ?? tab.id ?? '')
+            const holder = id === '' ? undefined : frameForTab({ id })
+            const url = String(tab.url ?? tab.address ?? (holder === undefined ? '' : safe(() => holder.getURL())) ?? '')
+            const title = String(tab.title ?? tab.label ?? (holder === undefined ? '' : safe(() => holder.getTitle())) ?? '')
+            const mark = activeId !== undefined && activeId === id ? '*' : ' '
+            return mark + ' ' + id + '  ' + title + '  ' + url
           })
           return { text: 'Browser tabs (' + String(rows.length) + ', * = active):\n' + lines.join('\n') }
         }
@@ -838,7 +912,7 @@ window.__ModuleLoader__.load({
         }
         case 'click': {
           const outcome = await runPage(frame, pageClick, { ref: args.ref, selector: args.selector })
-          await settle(frame, 350, 4500)
+          await settleFast(frame)
           return {
             text: 'Clicked <' + outcome.clicked.tag + '> ' + JSON.stringify(outcome.clicked.label)
               + '\nurl: ' + String(safe(() => frame.getURL()) || outcome.url)
@@ -848,7 +922,7 @@ window.__ModuleLoader__.load({
         }
         case 'type': {
           const outcome = await runPage(frame, pageType, { ref: args.ref, selector: args.selector, text: args.text, submit: args.submit === true })
-          await settle(frame, 300, 4500)
+          await settleFast(frame, { quietMs: 150 })
           return {
             text: 'Typed ' + String(outcome.typed) + ' characters into <' + outcome.target + '>.'
               + (args.submit === true ? ' Submitted the form.' : '')
@@ -860,7 +934,7 @@ window.__ModuleLoader__.load({
           const key = String(args.key)
           if (sendKey(frame, key) === 'dom') {
             const outcome = await runPage(frame, pagePress, { key })
-            await settle(frame, 300, 4500)
+            await settleFast(frame, { quietMs: 120 })
             return { text: 'Pressed ' + JSON.stringify(outcome.pressed) + ' on <' + outcome.active + '> (DOM event fallback).' }
           }
           if (key === 'Enter' || key === ' ' || key === 'Space') {
@@ -872,7 +946,7 @@ window.__ModuleLoader__.load({
               // The guest may already be navigating.
             }
           }
-          await settle(frame, 300, 4500)
+          await settleFast(frame, { quietMs: 120 })
           return {
             text: 'Pressed ' + JSON.stringify(key) + '.'
               + '\nurl: ' + String(safe(() => frame.getURL()) || '')
@@ -881,7 +955,7 @@ window.__ModuleLoader__.load({
         }
         case 'select': {
           const outcome = await runPage(frame, pageSelect, { ref: args.ref, selector: args.selector, value: args.value })
-          await settle(frame, 250)
+          await settleFast(frame, { quietMs: 120 })
           return { text: 'Selected value ' + JSON.stringify(outcome.value) + ' (index ' + String(outcome.selectedIndex) + ').'
             + '\ntitle: ' + JSON.stringify(String(safe(() => frame.getTitle()) || '')) }
         }
@@ -911,18 +985,11 @@ window.__ModuleLoader__.load({
           return { text: text.length > 20000 ? text.slice(0, 20000) + '\n(truncated)' : text }
         }
         case 'screenshot': {
-          let image
-          let firstError
-          for (let attempt = 0; attempt < 2 && image === undefined; attempt++) {
-            try {
-              const target = await ensureScreenshotFrame(state, ctx, frame)
-              image = await capture(target)
-            } catch (error) {
-              if (firstError === undefined) firstError = error
-              if (attempt === 0) await sleep(400)
-            }
-          }
-          if (image === undefined) throw firstError instanceof Error ? firstError : new Error('The screenshot could not be captured.')
+          /* One attempt, fail fast: reopening a tab to chase a capturable frame
+             can cost a minute and is worse than telling the person to bring the
+             Browser panel to the front. */
+          await revealFrame(ctx, frame)
+          const image = await capture(frame)
           const text = 'Captured the visible Browser page.\n' + statusText(ctx)
           return { text, png: image }
         }
@@ -952,6 +1019,34 @@ window.__ModuleLoader__.load({
           if (tab !== undefined && tab !== null) throw new Error('The active right-Sidebar tab is "' + String(tab.kind) + '", not a Browser tab.')
           throw new Error('There is no active right-Sidebar tab to close.')
         }
+        case 'batch': {
+          const steps = Array.isArray(args.steps) ? args.steps.slice(0, 12) : []
+          if (steps.length === 0) throw new Error('"batch" needs a non-empty steps array')
+          const started = Date.now()
+          const lines = []
+          let failed = ''
+          for (let index = 0; index < steps.length; index += 1) {
+            const step = steps[index] !== null && typeof steps[index] === 'object' ? steps[index] : {}
+            const sub = String(step.action || '')
+            if (BATCH_ACTIONS.has(sub) !== true) {
+              failed = 'step ' + String(index + 1) + ': ' + JSON.stringify(sub) + ' is not allowed inside batch'
+              break
+            }
+            try {
+              const result = await executeCommand(state, { action: sub, args: step })
+              const summary = String(result?.text || '').split('\n').filter((line) => line !== '').slice(0, 3).join(' · ')
+              lines.push(String(index + 1) + '. ' + sub + ': ' + summary.slice(0, 300))
+            } catch (error) {
+              failed = 'step ' + String(index + 1) + ' (' + sub + '): ' + (error instanceof Error ? error.message : String(error))
+              break
+            }
+          }
+          return {
+            text: 'Batch ' + String(steps.length) + ' step(s) in ' + String(Date.now() - started) + ' ms.'
+              + (failed === '' ? '' : '\nfailed: ' + failed)
+              + '\n' + lines.join('\n'),
+          }
+        }
         default:
           throw new Error('Unsupported browser action ' + JSON.stringify(action) + '.')
       }
@@ -965,11 +1060,30 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** Run a promise with a deadline, so one wedged action never blocks the bridge. */
+    async function withDeadline(promise, ms, label) {
+      let timer
+      try {
+        return await Promise.race([
+          promise,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(label + ' did not finish within ' + String(Math.round(ms / 1000)) + 's')), ms)
+          }),
+        ])
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+
     function apply(ctx) {
       const state = { ctx, last: undefined, running: true }
+      /* A plugin reload can leave the previous poll loop alive for a moment. The
+         newest instance owns the bridge; older ones stop before taking a command
+         they would execute with stale code. */
+      const generation = (globalThis.__dshScGeneration = (globalThis.__dshScGeneration || 0) + 1)
 
       async function post(name, payload, signal) {
-        const url = new URL('sidebar-browser-control/' + name, document.baseURI)
+        const url = new URL('sidebar-control/' + name, document.baseURI)
         const response = await fetch(url, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -984,6 +1098,7 @@ window.__ModuleLoader__.load({
       async function loop(signal) {
         const instance = randomInstanceId()
         while (state.running === true && signal.aborted === false) {
+          if (globalThis.__dshScGeneration !== generation) return
           try {
             const outcome = await post('poll', { instance, waitMs: POLL_WAIT_MS }, signal)
             if (signal.aborted || state.running === false) return
@@ -992,7 +1107,7 @@ window.__ModuleLoader__.load({
               if (signal.aborted || state.running === false) return
               let message
               try {
-                message = { ok: true, value: await executeCommand(state, command) }
+                message = { ok: true, value: await withDeadline(executeCommand(state, command), 45000, 'The action "' + String(command.action) + '"') }
               } catch (error) {
                 message = {
                   ok: false,
@@ -1015,7 +1130,7 @@ window.__ModuleLoader__.load({
       ctx.effect(() => {
         const controller = new AbortController()
         loop(controller.signal).catch((error) => {
-          console.error('[sidebar-browser-control] poll loop stopped', error)
+          console.error('[sidebar-control] poll loop stopped', error)
         })
         return () => {
           state.running = false

@@ -19,12 +19,20 @@ times in a row. Sidebar Control is tuned for the second and third read:
 |---|---|---|
 | Read a long page | full text + refs (up to 12k chars) | `read` with a `query` returns only matching passages (BM25 over Latin words + CJK bigrams) |
 | Check what an action changed | snapshot again | `diff` returns only paragraphs added/removed since the previous diff |
+| Several steps (open → fill → submit) | one tool call per step | `batch` runs up to 12 steps in one call |
+| After a click | fixed waits (350 ms + load window) | adaptive settle: returns when the page stops changing, often ~100 ms |
 | Several pages open | one controlled tab | `tabs` / `focus` / `close_tab` by id |
 | Command latency | long-poll | long-poll (same ~instant delivery, no timer polling) |
 | Dependencies | none | none |
 
-The practical difference is token cost: on a long article, `read --query "..."` returns a few hundred
-characters instead of thousands, and `diff` after a click returns one line or two.
+The practical difference is token cost and round trips: on a long article, `read --query "..."` returns a few
+hundred characters instead of thousands; `diff` after a click returns one line or two; and a five-step form
+costs one model call with `batch` instead of five. Clicks come back as soon as the page is quiet instead of
+after a fixed sleep.
+
+Measured on a Windows desktop against the live Browser panel: `batch` of **type + submit + wait for results +
+query read** on the Baidu homepage finished in **1043 ms**, and the same three steps on Bing in **832 ms**.
+The query read for "存款" returned one matching line where the full text was the whole page.
 
 ## Install
 
@@ -53,9 +61,10 @@ Requirements: **DeepSeek Harness Desktop** 0.2.2-rc.1 (the Browser panel must be
 | `status` | platform, Browser frames, active tab, whether the page is on screen |
 | `open` | open or reuse the Browser tab at a URL |
 | `navigate` / `back` / `forward` / `reload` | navigation |
-| `snapshot` | page text + numbered refs (`max_text_chars`, `max_refs`) |
+| `snapshot` | page text + numbered refs (`max_text_chars`, `max_refs`, `include_text: false` for refs only) |
 | `read` | text, or only passages matching `query` (`max_chars`) |
 | `diff` | paragraphs added/removed since the previous `diff` |
+| `batch` | run up to 12 steps in one call (navigate/click/type/press/select/scroll/wait/eval/read/diff/snapshot) |
 | `tabs` | list Browser tabs with ids |
 | `focus` / `close_tab` | switch to / close a tab by `tab_id` |
 | `click` | by `ref`, `selector` |
@@ -114,11 +123,17 @@ Agent 直接操作你正在看的那个 Browser 面板——读真实页面、�
 |---|---|---|
 | 读长页面 | 全文 + refs（最多 12k 字符） | `read` 带 `query`，只返回命中的段落（英文词 + 中文二元组的 BM25） |
 | 查看动作改了什么 | 再快照一次 | `diff` 只返回相对上次新增/消失的段落 |
+| 多步操作（打开→填写→提交） | 每步一次工具调用 | `batch` 一次调用跑最多 12 步 |
+| 点击之后 | 固定等待（350ms + 加载窗口） | 自适应：页面不再变化就返回，通常约 100ms |
 | 多个页面 | 只控制当前标签 | `tabs` / `focus` / `close_tab` 按 id 管理 |
 | 指令延迟 | 长轮询 | 长轮询（同样即时，不靠定时器） |
 | 依赖 | 无 | 无 |
 
-实际差别是 token：长文章里 `read --query "..."` 往往只回几百字，而不是几千字；点击后用 `diff` 通常只回一两行。
+实际差别是 token 和往返次数：长文章里 `read --query "..."` 往往只回几百字，而不是几千字；点击后用 `diff`
+通常只回一两行；五步表单用 `batch` 只花一次模型调用，而不是五次。点击也不再固定睡眠，页面安静就返回。
+
+在 Windows 桌面版、真实 Browser 面板上的实测：`batch` 执行 **输入 + 提交 + 等结果 + 按 query 阅读**，
+百度首页 **1043 ms**、Bing **832 ms**；`read` 查“存款”只返回命中的一行，而整页文本是整屏。
 
 ### 安装
 
@@ -146,9 +161,10 @@ dsh plugin --profile desktop add dsh-sidebar-control
 | `status` | 平台、Browser 帧、当前标签、页面是否在屏幕上 |
 | `open` | 打开或复用 Browser 标签（url） |
 | `navigate` / `back` / `forward` / `reload` | 导航 |
-| `snapshot` | 页面文字 + 编号 refs（`max_text_chars`、`max_refs`） |
+| `snapshot` | 页面文字 + 编号 refs（`max_text_chars`、`max_refs`；`include_text: false` 只回控件） |
 | `read` | 纯文本，或只回与 `query` 匹配的段落（`max_chars`） |
 | `diff` | 相对上一次 `diff` 新增/消失的段落 |
+| `batch` | 一次调用执行最多 12 步（navigate/click/type/press/select/scroll/wait/eval/read/diff/snapshot） |
 | `tabs` | 列出 Browser 标签及其 id |
 | `focus` / `close_tab` | 按 `tab_id` 切换 / 关闭标签 |
 | `click` | 按 `ref` 或 `selector` 点击 |
