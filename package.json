@@ -44,6 +44,19 @@
     "access": "public"
   },
   "license": "MIT",
+  "author": {
+    "name": "Hongrui Zhao",
+    "email": "hongruizhao0808@gmail.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clusterstar1229/dsh-sidebar-control.git"
+  },
+  "homepage": "https://github.com/clusterstar1229/dsh-sidebar-control#readme",
+  "bugs": {
+    "url": "https://github.com/clusterstar1229/dsh-sidebar-control/issues",
+    "email": "hongruizhao0808@gmail.com"
+  },
   "keywords": [
     "dsh",
     "dsh-plugin",

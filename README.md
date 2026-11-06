@@ -101,6 +101,11 @@ change, or just use `diff` when you only need to know what changed.
 - [`dsh-sidebar-browser-agent`](https://github.com/Hesitate-P/dsh-sidebar-browser-agent) — a broader
   native-input implementation with tabs, tests and config switches.
 
+## Feedback
+
+Bugs and feature requests: **hongruizhao0808@gmail.com** — or open an issue at
+https://github.com/clusterstar1229/dsh-sidebar-control/issues.
+
 ## License
 
 MIT. Derived from `dsh-sidebar-browser` (MIT); see [LICENSE](LICENSE).
@@ -193,6 +198,11 @@ refs 来自最近一次快照，导航后会失效——页面变了就重新 `s
 
 - [`dsh-sidebar-browser`](https://www.npmjs.com/package/dsh-sidebar-browser) — 本项目的 MIT 基础实现。
 - [`dsh-sidebar-browser-agent`](https://github.com/Hesitate-P/dsh-sidebar-browser-agent) — 更全面的原生输入实现（标签页、测试、配置开关）。
+
+### 反馈
+
+Bug 与功能建议：**hongruizhao0808@gmail.com**，或到
+https://github.com/clusterstar1229/dsh-sidebar-control/issues 提 issue。
 
 ### 许可
 
