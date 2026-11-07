@@ -14,6 +14,9 @@ window.__ModuleLoader__.load({
     const POLL_WAIT_MS = 25000
     const FRAME_SELECTOR = 'webview[data-sidebar-browser-frame]'
     const LIST_LIMIT = 120
+    const VERSION = '0.2.1'
+    const DEFAULT_ACTION_BUDGET_MS = 85000
+    const MAX_ACTION_BUDGET_MS = 295000
     /* Actions a batch may contain. A batch is one tool call for several steps,
        so it saves the model a round trip per step; it may not nest or open tabs. */
     const BATCH_ACTIONS = new Set(['navigate', 'click', 'type', 'press', 'select', 'scroll', 'wait', 'eval', 'read', 'diff', 'snapshot'])
@@ -50,24 +53,33 @@ window.__ModuleLoader__.load({
         '[contenteditable="true"]',
       ].join(',')
       const isVisible = (element) => {
+        if (element.closest('[hidden], [inert]') !== null) return false
+        /* Chromium still lays out content of a closed <details> here, so its
+           rect is non-zero even though the person cannot see it. */
+        const details = element.closest('details:not([open])')
+        if (details !== null && element.tagName !== 'SUMMARY') return false
         const rect = element.getBoundingClientRect()
         if (rect.width < 1 || rect.height < 1) return false
         const style = getComputedStyle(element)
         return style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity) !== 0
       }
       const labelOf = (element) => {
-        const raw = element.getAttribute('aria-label')
-          || element.getAttribute('title')
-          || element.getAttribute('placeholder')
-          || element.getAttribute('alt')
-          || element.innerText
-          || element.value
-          || element.getAttribute('name')
-          || ''
+        let raw = element.getAttribute('aria-label') || element.getAttribute('title') || ''
+        if (raw === '' && element.labels !== undefined && element.labels !== null && element.labels.length > 0) {
+          raw = element.labels[0].innerText
+        }
+        if (raw === '' && (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA')) raw = element.getAttribute('placeholder') || ''
+        if (raw === '') raw = element.innerText || element.getAttribute('alt') || ''
+        if (raw === '' && (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA')) raw = element.value || ''
+        if (raw === '') raw = element.getAttribute('name') || ''
         return String(raw).replace(/\s+/g, ' ').trim().slice(0, 160)
       }
       const refs = []
       let refsTruncated = false
+      /* Snapshot refs are positional. Clear numbers from an older snapshot first,
+         otherwise an element skipped this time keeps a number that a fresh ref
+         may now own, and a stale ref could hit the wrong element. */
+      for (const stale of document.querySelectorAll('[data-dsh-bc-ref]')) stale.removeAttribute('data-dsh-bc-ref')
       const candidates = document.querySelectorAll(selector)
       for (const element of candidates) {
         if (refs.length >= maxRefs) {
@@ -87,7 +99,10 @@ window.__ModuleLoader__.load({
         if (label.length > 0) entry.label = label
         if (tag === 'a') {
           const href = element.getAttribute('href')
-          if (href !== null) entry.href = String(href).slice(0, 500)
+          if (href !== null) {
+            const text = String(href)
+            entry.href = text.length > 240 ? text.slice(0, 240) + '…' : text
+          }
           if (label.length === 0) {
             const image = element.querySelector('img[alt]')
             const alt = image === null ? '' : String(image.getAttribute('alt') || '').replace(/\s+/g, ' ').trim()
@@ -122,6 +137,8 @@ window.__ModuleLoader__.load({
         },
         refs,
         refsTruncated,
+        iframes: document.querySelectorAll('iframe').length,
+        includeText,
         text: text.slice(0, maxTextChars),
         textTruncated: text.length > maxTextChars,
       }
@@ -140,61 +157,122 @@ window.__ModuleLoader__.load({
     function pageClick(options) {
       const element = pageFind(options)
       if (element === null) {
-        throw new Error(options.ref !== undefined
+        const iframes = document.querySelectorAll('iframe').length
+        const hint = iframes > 0
+          ? ' (the page has ' + String(iframes) + ' iframe(s); refs and selectors only see the top document)'
+          : ''
+        throw new Error((options.ref !== undefined
           ? 'No element has ref ' + String(options.ref) + ' on this page; take a new snapshot.'
-          : 'No element matches selector ' + String(options.selector) + '.')
+          : 'No element matches selector ' + String(options.selector) + '.') + hint)
       }
-      const label = String(element.innerText || element.getAttribute('aria-label') || element.getAttribute('title') || '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 120)
+      const describe = (node) => {
+        const label = node.getAttribute('aria-label')
+          || node.getAttribute('title')
+          || (node.labels !== undefined && node.labels !== null && node.labels.length > 0 ? node.labels[0].innerText : '')
+          || node.innerText
+          || node.getAttribute('placeholder')
+          || node.getAttribute('alt')
+          || node.value
+          || ''
+        return { tag: node.tagName.toLowerCase(), label: String(label).replace(/\s+/g, ' ').trim().slice(0, 120) }
+      }
       element.scrollIntoView({ block: 'center', inline: 'center' })
       const target = element.closest('a,button,label,summary,[role="button"],[role="link"]') || element
       target.click()
-      return { clicked: { tag: target.tagName.toLowerCase(), label }, url: String(location.href) }
+      /* element.click() on an input does not focus it, so a following press would
+         land on <body>. Clicking with a mouse focuses text fields; do the same. */
+      if (element.matches('input,textarea,select,[contenteditable="true"]') && typeof element.focus === 'function') {
+        try {
+          element.focus({ preventScroll: true })
+        } catch {
+          element.focus()
+        }
+      }
+      const info = describe(target)
+      const href = target.tagName === 'A' ? String(target.getAttribute('href') || '') : ''
+      return { clicked: { tag: info.tag, label: info.label, ...(href === '' ? {} : { href }) }, url: String(location.href) }
     }
 
     function pageType(options) {
+      const unsupported = new Set(['file', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image'])
       const element = pageFind(options)
       if (element === null) {
-        throw new Error(options.ref !== undefined
+        const iframes = document.querySelectorAll('iframe').length
+        const hint = iframes > 0
+          ? ' (the page has ' + String(iframes) + ' iframe(s); refs and selectors only see the top document)'
+          : ''
+        throw new Error((options.ref !== undefined
           ? 'No element has ref ' + String(options.ref) + ' on this page; take a new snapshot.'
-          : 'No element matches selector ' + String(options.selector) + '.')
+          : 'No element matches selector ' + String(options.selector) + '.') + hint)
+      }
+      const tag = element.tagName
+      const editable = element.isContentEditable === true
+      if (tag !== 'INPUT' && tag !== 'TEXTAREA' && editable !== true) {
+        throw new Error('Cannot type into <' + tag.toLowerCase() + '>; use a text input, textarea or contenteditable element (for a <select> use action "select").')
+      }
+      const type = tag === 'INPUT' ? String(element.type || '').toLowerCase() : ''
+      if (unsupported.has(type)) {
+        throw new Error('Cannot type into <input type="' + type + '">; use action "click" to toggle it (for a <select> use action "select").')
       }
       const text = String(options.text)
       element.scrollIntoView({ block: 'center' })
       if (typeof element.focus === 'function') element.focus()
-      if (element.isContentEditable === true) {
+      if (editable === true) {
         element.textContent = text
         element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }))
+        element.dispatchEvent(new Event('change', { bubbles: true }))
       } else {
-        const prototype = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+        const prototype = tag === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
         const setter = Object.getOwnPropertyDescriptor(prototype, 'value')
         if (setter !== undefined && typeof setter.set === 'function') setter.set.call(element, text)
         else element.value = text
         element.dispatchEvent(new Event('input', { bubbles: true }))
         element.dispatchEvent(new Event('change', { bubbles: true }))
+        /* A number/date/maxlength field silently drops or truncates text. Report
+           that instead of claiming success. */
+        const applied = String(element.value ?? '')
+        if (applied !== text) {
+          const shown = applied.length > 120 ? applied.slice(0, 120) + '…' : applied
+          throw new Error('<' + tag.toLowerCase() + (type === '' ? '' : ' type="' + type + '"') + '> did not keep the text: value is ' + JSON.stringify(shown) + '. The field may reject, mask or truncate this value.')
+        }
       }
+      let submitted = ''
       if (options.submit === true) {
-        if (element.form !== null && element.form !== undefined && typeof element.form.requestSubmit === 'function') element.form.requestSubmit()
-        else element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }))
+        if (element.form !== null && element.form !== undefined && typeof element.form.requestSubmit === 'function') {
+          element.form.requestSubmit()
+          submitted = 'form'
+        } else {
+          submitted = 'enter'
+        }
       }
-      return { typed: text.length, target: element.tagName.toLowerCase(), url: String(location.href) }
+      return { typed: text.length, target: tag.toLowerCase(), submitted, url: String(location.href) }
     }
 
     function pagePress(options) {
+      const KEY_CODES = {
+        Enter: 13, Tab: 9, Escape: 27, Esc: 27, Backspace: 8, Delete: 46, Home: 36, End: 35,
+        PageUp: 33, PageDown: 34, ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39,
+        ' ': 32, Space: 32,
+      }
       const key = String(options.key)
+      const mods = Array.isArray(options.modifiers) ? options.modifiers : []
       const target = document.activeElement || document.body
-      const keyCode = key === 'Enter' ? 13
-        : key === 'Tab' ? 9
-          : key === 'Escape' ? 27
-            : key === 'ArrowDown' ? 40
-              : key === 'ArrowUp' ? 38
-                : key === 'ArrowLeft' ? 37
-                  : key === 'ArrowRight' ? 39
-                    : key === ' ' || key === 'Space' ? 32
-                      : 0
-      const init = { key, code: key === ' ' ? 'Space' : key, keyCode, which: keyCode, bubbles: true, cancelable: true }
+      const named = KEY_CODES[key] || 0
+      const upper = key.length === 1 ? key.toUpperCase() : key
+      const keyCode = named || (key.length === 1 ? upper.charCodeAt(0) : 0)
+      const code = key.length === 1 && /[a-z0-9]/i.test(key) ? 'Key' + upper : (key === ' ' || key === 'Space' ? 'Space' : key)
+      const init = {
+        key,
+        code,
+        keyCode,
+        which: keyCode,
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: mods.includes('ctrl'),
+        altKey: mods.includes('alt'),
+        shiftKey: mods.includes('shift'),
+        metaKey: mods.includes('meta'),
+      }
       target.dispatchEvent(new KeyboardEvent('keydown', init))
       target.dispatchEvent(new KeyboardEvent('keyup', init))
       if (key === 'Enter' && target.form !== null && target.form !== undefined && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
@@ -211,46 +289,54 @@ window.__ModuleLoader__.load({
       const element = pageFind(options)
       if (element === null) throw new Error('No select element matches the given ref or selector.')
       if (element.tagName !== 'SELECT') throw new Error('The target element is <' + element.tagName.toLowerCase() + '>, not a <select>.')
-      const value = String(options.value)
-      element.value = value
-      if (element.value !== value) {
-        const option = Array.from(element.options).find((candidate) => candidate.text === value || candidate.label === value)
-        if (option !== undefined) element.value = option.value
+      const want = String(options.value)
+      const normalize = (value) => String(value === undefined || value === null ? '' : value).trim()
+      const list = Array.from(element.options)
+      let index = list.findIndex((option) => option.value === want)
+      if (index < 0) index = list.findIndex((option) => normalize(option.label || option.text) === want)
+      if (index < 0) index = list.findIndex((option) => normalize(option.label || option.text).toLowerCase() === want.toLowerCase())
+      if (index < 0) {
+        const shown = list.slice(0, 40).map((option) => JSON.stringify(option.value) + '=' + JSON.stringify(normalize(option.label || option.text)))
+        throw new Error('No option matches ' + JSON.stringify(want) + ' in this <select>; available: '
+          + shown.join(', ') + (list.length > 40 ? ', …' : '') + '.')
       }
+      element.selectedIndex = index
       element.dispatchEvent(new Event('input', { bubbles: true }))
       element.dispatchEvent(new Event('change', { bubbles: true }))
-      return { value: element.value, selectedIndex: element.selectedIndex }
+      return { value: element.value, label: normalize(list[index].label || list[index].text), selectedIndex: index }
     }
 
     function pageScroll(options) {
+      const direction = String(options.direction || 'down')
+      const amount = Number(options.amount) > 0 ? Number(options.amount) : 600
       if (options.ref !== undefined && options.ref !== null) {
         const element = pageFind(options)
         if (element === null) throw new Error('No element has ref ' + String(options.ref) + '; take a new snapshot.')
         element.scrollIntoView({ block: 'center' })
-        return { scrolledTo: { ref: options.ref }, y: Math.round(window.scrollY) }
-      }
-      const amount = Number(options.amount) > 0 ? Number(options.amount) : 600
-      const direction = String(options.direction || 'down')
-      const dx = direction === 'left' ? -amount : direction === 'right' ? amount : 0
-      const dy = direction === 'up' ? -amount : amount
-      window.scrollBy({ left: dx, top: dy, behavior: 'instant' })
-      return { x: Math.round(window.scrollX), y: Math.round(window.scrollY) }
-    }
-
-    async function pageWait(options) {
-      const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 5000
-      const deadline = Date.now() + timeoutMs
-      while (Date.now() < deadline) {
-        if (typeof options.selector === 'string' && options.selector.length > 0) {
-          if (document.querySelector(options.selector) !== null) return { found: true, kind: 'selector', selector: options.selector }
-        } else if (typeof options.text === 'string' && options.text.length > 0) {
-          const bodyText = document.body === null ? '' : String(document.body.innerText || '')
-          if (bodyText.includes(options.text)) return { found: true, kind: 'text', text: options.text }
+        const rect = element.getBoundingClientRect()
+        return {
+          x: Math.round(window.scrollX), y: Math.round(window.scrollY),
+          target: { ref: options.ref, tag: element.tagName.toLowerCase() }, rectTop: Math.round(rect.top),
         }
-        await new Promise((resolve) => setTimeout(resolve, 150))
       }
-      throw new Error('Timed out after ' + String(timeoutMs) + 'ms waiting for '
-        + (typeof options.selector === 'string' && options.selector.length > 0 ? 'selector ' + options.selector : 'text ' + String(options.text)) + '.')
+      if (typeof options.selector === 'string' && options.selector.length > 0) {
+        const element = pageFind({ selector: options.selector })
+        if (element === null) throw new Error('No element matches selector ' + options.selector + '.')
+        element.scrollIntoView({ block: 'center' })
+        const rect = element.getBoundingClientRect()
+        return {
+          x: Math.round(window.scrollX), y: Math.round(window.scrollY),
+          target: { selector: options.selector, tag: element.tagName.toLowerCase() }, rectTop: Math.round(rect.top),
+        }
+      }
+      const dx = direction === 'left' ? -amount : direction === 'right' ? amount : 0
+      const dy = direction === 'up' ? -amount : direction === 'down' ? amount : 0
+      const beforeX = Math.round(window.scrollX)
+      const beforeY = Math.round(window.scrollY)
+      window.scrollBy({ left: dx, top: dy, behavior: 'instant' })
+      const x = Math.round(window.scrollX)
+      const y = Math.round(window.scrollY)
+      return { x, y, moved: x !== beforeX || y !== beforeY }
     }
 
     /**
@@ -416,11 +502,18 @@ window.__ModuleLoader__.load({
       }
       const frames = browserFrames()
       if (frames.length === 0) return undefined
-      const visibleFrames = frames.filter(frameIsVisible)
-      if (state.last !== undefined && state.last.isConnected === true && visibleFrames.includes(state.last)) return state.last
+      /* Never adopt a frame that belongs to another Session: driving it would
+         navigate/click a page the person is not looking at. */
+      const own = frames.filter((frame) => frameTabInfo(ctx, frame).same !== false)
+      if (own.length === 0) return undefined
+      const visibleFrames = own.filter(frameIsVisible)
+      /* A frame proven ours by an earlier command wins; otherwise a visible one;
+         a single candidate is unambiguous; several without an active tab is not,
+         and guessing could drive another Session's page. */
+      if (state.last !== undefined && state.last.isConnected === true && own.includes(state.last)) return state.last
       if (visibleFrames.length > 0) return visibleFrames[visibleFrames.length - 1]
-      if (state.last !== undefined && state.last.isConnected === true) return state.last
-      return frames[frames.length - 1]
+      if (own.length === 1) return own[0]
+      return undefined
     }
 
     async function frameReady(frame, timeoutMs) {
@@ -440,12 +533,39 @@ window.__ModuleLoader__.load({
         + (lastError instanceof Error && lastError.message ? ': ' + lastError.message : '. Open or reload the Browser tab and retry.'))
     }
 
+    /** A freshly mounted webview answers frameReady before it has an address, and
+        starts on about:blank while the requested URL is still loading. The dock
+        may also replace the tab body while it loads, so re-pick every tick. */
+    async function waitPageReady(state, ctx, frame, timeoutMs, allowBlank) {
+      const deadline = Date.now() + timeoutMs
+      let current = frame
+      let seen = ''
+      while (Date.now() < deadline) {
+        const picked = pickFrame(state, ctx)
+        if (picked !== undefined) current = picked
+        const url = String(safe(() => current.getURL()) || '')
+        if (url !== '' && (allowBlank === true || url !== 'about:blank')) {
+          if (seen === '') seen = url
+          if (safe(() => current.isLoading()) !== true) {
+            const ready = await safe(() => current.executeJavaScript('document.readyState', true))
+            if (ready === 'complete' || ready === 'interactive') return { frame: current, url }
+          }
+        }
+        await sleep(150)
+      }
+      return { frame: current, url: seen }
+    }
+
     function sidebarRightOf(ctx) {
       if (typeof ctx.get === 'function') return ctx.get('sidebarRight')
       return ctx.sidebarRight
     }
 
-    async function openBrowserTab(ctx, url) {
+    /**
+     * Ask the right Sidebar for a Browser tab and wait until *its* frame exists.
+     * Foreign Session frames are ignored: they are not the tab we just asked for.
+     */
+    async function openBrowserTab(ctx, url, previousTabId) {
       const sidebarRight = sidebarRightOf(ctx)
       if (sidebarRight === undefined || sidebarRight === null) {
         throw new Error('The right Sidebar is unavailable in this Harness page, so a Browser tab cannot be opened (Desktop app required for Browser control).')
@@ -458,36 +578,27 @@ window.__ModuleLoader__.load({
       const deadline = Date.now() + 20000
       while (Date.now() < deadline) {
         const tab = activeBrowserTab(ctx)
-        const frame = (tab === undefined ? undefined : frameForTab(tab))
-          || browserFrames().filter(frameIsVisible)[0]
-          || browserFrames()[0]
-        if (frame !== undefined) return frame
+        const tabId = tab === undefined || tab.id === undefined || tab.id === null ? undefined : String(tab.id)
+        const own = browserFrames().filter((frame) => frameTabInfo(ctx, frame).same !== false)
+        const exact = tab === undefined ? undefined : frameForTab(tab)
+        const fresh = previousTabId === undefined || tabId === undefined || tabId !== previousTabId
+        if (exact !== undefined && fresh) return { frame: exact, tabId }
+        const visible = own.filter(frameIsVisible)
+        if (visible.length > 0 && fresh) return { frame: visible[visible.length - 1], tabId }
         await sleep(150)
       }
-      throw new Error('The Browser tab was requested but no Browser frame appeared. Check that the right Sidebar Browser is enabled in this Harness build.')
-    }
-
-    async function settleActiveFrame(state, ctx, fallback) {
-      let frame = pickFrame(state, ctx) || fallback
-      if (frame === undefined) return undefined
-      await frameReady(frame, 15000)
-      await waitForHttpPage(frame, 30000)
-      const latest = pickFrame(state, ctx)
-      if (latest !== undefined && latest !== frame) {
-        // The dock re-created the tab body while loading (new occurrence/lease).
-        frame = latest
-        await frameReady(frame, 15000)
-        await waitForHttpPage(frame, 30000)
-      }
-      state.last = frame
-      return frame
+      throw new Error('A Browser tab was requested for ' + url + ' but no Browser frame appeared within 20s. '
+        + 'The tab may still be loading; call action "status" in a moment.')
     }
 
     async function activeFrame(state, ctx, options) {
-      let frame = pickFrame(state, ctx)
-      if (frame === undefined && options.openUrl !== undefined) frame = await openBrowserTab(ctx, options.openUrl)
+      const frame = pickFrame(state, ctx)
       if (frame === undefined) {
-        throw new Error('No Browser tab is open in the right Sidebar. Call the browser tool with action "open" and a url first.')
+        const total = browserFrames().length
+        const foreign = browserFrames().filter((candidate) => frameTabInfo(ctx, candidate).same === false).length
+        throw new Error('No Browser tab is available for this Session'
+          + (foreign > 0 ? ' (' + String(foreign) + ' Browser tab(s) belong to other Sessions and are left alone)' : '')
+          + (total > 0 ? '. ' + String(total) + ' Browser frame(s) exist but none can be proven to belong here; pass a url to action "open" to establish one.' : '. Call action "open" with a url first.'))
       }
       await frameReady(frame, options.readyTimeoutMs === undefined ? 15000 : options.readyTimeoutMs)
       state.last = frame
@@ -560,31 +671,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Make a frame capturable. When the frame is hidden behind another right-Sidebar
-     * tab (or belongs to a Session that is no longer on screen), reopen the same page
-     * in a fresh Browser tab of the on-screen Session so the capture is never blank.
-     */
-    async function ensureScreenshotFrame(state, ctx, frame) {
-      try {
-        await revealFrame(ctx, frame)
-        return frame
-      } catch (error) {
-        const url = String(safe(() => frame.getURL()) || '')
-        if (!/^https?:/i.test(url)) throw error
-        let fresh
-        try {
-          await openBrowserTab(ctx, url)
-          fresh = await settleActiveFrame(state, ctx, undefined)
-        } catch {
-          throw error
-        }
-        if (fresh === undefined) throw error
-        await revealFrame(ctx, fresh)
-        return fresh
-      }
-    }
-
     function runPage(frame, fn, args) {
       const code = '(async () => { try {'
         + ' const pageFind = ' + pageFind.toString() + ';'
@@ -599,19 +685,6 @@ window.__ModuleLoader__.load({
       })
     }
 
-    async function waitForHttpPage(frame, timeoutMs) {
-      const deadline = Date.now() + timeoutMs
-      while (Date.now() < deadline) {
-        const url = safe(() => frame.getURL())
-        if (typeof url === 'string' && /^https?:/i.test(url) && safe(() => frame.isLoading()) !== true) {
-          const state = await safe(() => frame.executeJavaScript('document.readyState', true))
-          if (state === 'complete' || state === 'interactive') return url
-        }
-        await sleep(150)
-      }
-      return safe(() => frame.getURL())
-    }
-
     async function isLoading(frame) {
       try {
         return frame.isLoading() === true
@@ -620,12 +693,33 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function sendKey(frame, key) {
+    /* Electron's accelerator names differ from DOM key names. */
+    const ACCEL_KEY = new Map([
+      ['ArrowUp', 'Up'], ['ArrowDown', 'Down'], ['ArrowLeft', 'Left'], ['ArrowRight', 'Right'],
+      ['Escape', 'Esc'], [' ', 'Space'], ['Space', 'Space'], ['Spacebar', 'Space'],
+    ])
+    const MODIFIER_NAMES = { ctrl: 'control', alt: 'alt', shift: 'shift', meta: 'meta' }
+
+    function modifierList(modifiers) {
+      const list = []
+      for (const name of Array.isArray(modifiers) ? modifiers : []) {
+        const mapped = MODIFIER_NAMES[name]
+        if (mapped !== undefined && list.includes(mapped) !== true) list.push(mapped)
+      }
+      return list
+    }
+
+    function sendKey(frame, key, modifiers) {
+      const accel = ACCEL_KEY.get(key) || key
+      const mods = modifierList(modifiers)
       try {
         frame.focus()
-        frame.sendInputEvent({ type: 'keyDown', keyCode: key })
-        if (key.length === 1) frame.sendInputEvent({ type: 'char', keyCode: key })
-        frame.sendInputEvent({ type: 'keyUp', keyCode: key })
+        /* Electron expects modifiers as a string[] such as ['control','shift'],
+           not a bitmask. */
+        frame.sendInputEvent({ type: 'keyDown', keyCode: accel, modifiers: mods })
+        const plain = /^.$/.test(key) && mods.length === 0
+        if (plain) frame.sendInputEvent({ type: 'char', keyCode: key })
+        frame.sendInputEvent({ type: 'keyUp', keyCode: accel, modifiers: mods })
         return 'native'
       } catch {
         return 'dom'
@@ -689,10 +783,35 @@ window.__ModuleLoader__.load({
         await frame.loadURL(url)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        if (!/ERR_ABORTED/.test(message)) throw new Error('Navigation to ' + url + ' failed: ' + message)
+        if (!/ERR_ABORTED/.test(message)) {
+          if (/^file:/i.test(url) && /ERR_FAILED|ERR_ACCESS_DENIED|ERR_FILE_NOT_FOUND|ERR_UNKNOWN_URL_SCHEME/i.test(message)) {
+            throw new Error('This Browser build refuses to load local files (' + message + '). '
+              + 'Serve the file over http — for example "python -m http.server 8000" — and open http://127.0.0.1:8000/… instead.')
+          }
+          throw new Error('Navigation to ' + url + ' failed: ' + message)
+        }
       }
       await settle(frame, 150)
       await frameReady(frame, 10000)
+    }
+
+    function estimateTokens(text) {
+      const value = String(text || '')
+      let latin = 0
+      let cjk = 0
+      let other = 0
+      for (const ch of value) {
+        const code = ch.codePointAt(0)
+        if (code >= 0x4e00 && code <= 0x9fff) cjk += 1
+        else if (code < 0x80) latin += 1
+        else other += 1
+      }
+      return Math.ceil(latin / 4 + cjk / 1.5 + other / 2)
+    }
+
+    function sizeNote(text) {
+      const value = String(text || '')
+      return value.length + ' chars ≈ ' + estimateTokens(value) + ' tokens'
     }
 
     function formatSnapshot(snapshot) {
@@ -701,6 +820,7 @@ window.__ModuleLoader__.load({
       lines.push('title: ' + (snapshot.title.length > 0 ? snapshot.title : '(untitled)'))
       lines.push('scroll: y=' + String(snapshot.scroll.y) + ' pageHeight=' + String(snapshot.scroll.height))
       lines.push('refs: ' + String(snapshot.refs.length) + (snapshot.refsTruncated ? ' (truncated; refine with eval or selector)' : ''))
+      if (snapshot.includeText !== false) lines.push('size: ' + sizeNote(snapshot.text) + (snapshot.textTruncated ? ' (truncated)' : ''))
       for (const ref of snapshot.refs) {
         const details = []
         if (ref.role !== undefined && ref.role !== '') details.push('role=' + ref.role)
@@ -716,10 +836,15 @@ window.__ModuleLoader__.load({
         lines.push('#' + String(ref.ref) + ' <' + ref.tag + '> ' + details.join(' '))
       }
       if (snapshot.refs.length === 0) lines.push('(no visible interactive elements)')
-      lines.push('')
-      lines.push('text:')
-      lines.push(snapshot.text.length > 0 ? snapshot.text : '(empty page text)')
-      if (snapshot.textTruncated) lines.push('(text truncated; use eval to read a specific region)')
+      if (snapshot.iframes > 0) {
+        lines.push('(note: ' + String(snapshot.iframes) + ' iframe(s) on the page are not traversed by refs or text)')
+      }
+      if (snapshot.includeText !== false) {
+        lines.push('')
+        lines.push('text:')
+        lines.push(snapshot.text.length > 0 ? snapshot.text : '(empty page text)')
+        if (snapshot.textTruncated) lines.push('(text truncated; use eval to read a specific region)')
+      }
       return lines.join('\n')
     }
 
@@ -727,6 +852,7 @@ window.__ModuleLoader__.load({
       const frames = browserFrames()
       const sidebarRight = sidebarRightOf(ctx)
       const lines = []
+      lines.push('plugin: ' + VERSION)
       lines.push('platform: ' + (globalThis.dshDesktop === undefined ? 'web' : 'desktop'))
       lines.push('browserFrames: ' + String(frames.length))
       let activeTab
@@ -750,12 +876,53 @@ window.__ModuleLoader__.load({
       return lines.join('\n')
     }
 
+    /**
+     * Wait from the client: each probe is a fresh injection, so a navigation that
+     * replaces the document does not tear the wait down. A selector must be
+     * visible (a hidden dialog is not "appeared"); a text wait compares visible
+     * text. With both, both must match.
+     */
+    async function waitFor(frame, options, timeoutMs) {
+      const hasSelector = typeof options.selector === 'string' && options.selector.length > 0
+      const hasText = typeof options.text === 'string' && options.text.length > 0
+      const deadline = Date.now() + timeoutMs
+      const wanted = hasSelector && hasText
+        ? 'selector ' + options.selector + ' and text ' + JSON.stringify(String(options.text))
+        : hasSelector ? 'selector ' + options.selector : 'text ' + JSON.stringify(String(options.text))
+      while (Date.now() < deadline) {
+        let probe = null
+        try {
+          probe = await frame.executeJavaScript('(() => {'
+            + ' const selector = ' + JSON.stringify(hasSelector ? options.selector : '') + ';'
+            + ' const text = ' + JSON.stringify(hasText ? options.text : '') + ';'
+            + ' const visible = (element) => { if (element === null || element === undefined) return false;'
+            + '   if (element.closest("[hidden], [inert]") !== null) return false;'
+            + '   const closed = element.closest("details:not([open])");'
+            + '   if (closed !== null && element.tagName !== "SUMMARY") return false;'
+            + '   const rect = element.getBoundingClientRect();'
+            + '   if (rect.width < 1 || rect.height < 1) return false;'
+            + '   const style = getComputedStyle(element);'
+            + '   return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) !== 0 };'
+            + ' const found = selector === "" ? document.body !== null : visible(document.querySelector(selector));'
+            + ' const matched = text === "" ? true : (document.body !== null && String(document.body.innerText || "").includes(text));'
+            + ' return { found, matched }; })()', true)
+        } catch {
+          probe = null
+        }
+        if (probe !== null && probe !== undefined && probe.found === true && probe.matched === true) {
+          return { found: true, ...(hasSelector ? { selector: options.selector } : {}), ...(hasText ? { text: options.text } : {}) }
+        }
+        await sleep(150)
+      }
+      throw new Error('Timed out after ' + String(timeoutMs) + 'ms waiting for ' + wanted + '.')
+    }
+
     async function capture(frame) {
       if (typeof frame.capturePage !== 'function') throw new Error('This Harness build does not expose capturePage on the Browser frame.')
       /* capturePage can never settle for an occluded guest; a deadline turns a
          wedged call into an answer instead of a bridge stuck for minutes. */
       let timer
-      const image = await Promise.race([
+      let image = await Promise.race([
         frame.capturePage(),
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(new Error('the screenshot did not finish within 10s — is the Harness window visible?')), 10000)
@@ -763,11 +930,60 @@ window.__ModuleLoader__.load({
       ]).finally(() => clearTimeout(timer))
       if (image === undefined || image === null) throw new Error('The Browser frame returned no screenshot.')
       if (typeof image.isEmpty === 'function' && image.isEmpty()) throw new Error('The Browser frame returned an empty screenshot.')
-      const dataUrl = String(image.toDataURL())
       const prefix = 'data:image/png;base64,'
+      let dataUrl = String(image.toDataURL())
       if (!dataUrl.startsWith(prefix)) throw new Error('The screenshot used an unexpected encoding.')
-      const size = typeof image.getSize === 'function' ? image.getSize() : { width: 0, height: 0 }
+      let size = typeof image.getSize === 'function' ? image.getSize() : { width: 0, height: 0 }
+      /* A 4K viewport can exceed the bridge's JSON body limit; downscale before
+         sending rather than letting the result POST fail silently. */
+      if (dataUrl.length > 6000000 && typeof image.resize === 'function') {
+        const scaled = image.resize({ width: 1600, quality: 'good' })
+        if (scaled !== undefined && scaled !== null && typeof scaled.toDataURL === 'function') {
+          const scaledUrl = String(scaled.toDataURL())
+          if (scaledUrl.startsWith(prefix)) {
+            image = scaled
+            dataUrl = scaledUrl
+            size = typeof scaled.getSize === 'function' ? scaled.getSize() : size
+          }
+        }
+      }
       return { base64: dataUrl.slice(prefix.length), width: size.width, height: size.height }
+    }
+
+    function currentSessionId(ctx) {
+      const sidebarRight = sidebarRightOf(ctx)
+      if (sidebarRight === undefined || sidebarRight === null) return undefined
+      const mounted = safe(() => sidebarRight.mounted?.getSnapshot())
+      const current = safe(() => sidebarRight.focusedTarget?.())
+      const active = safe(() => sidebarRight.active())
+      return (current === undefined || current === null ? undefined : current.sessionId)
+        ?? mounted
+        ?? (active === undefined || active === null ? undefined : active.sessionId)
+    }
+
+    /** Browser tabs split into "this Session" and "all" so tab ids with the same
+        value in another Session are never silently focused or closed. */
+    function browserTabs(ctx) {
+      const side = sidebarRightOf(ctx)
+      const open = side === undefined || side === null ? undefined : safe(() => side.openTabs?.getSnapshot())
+      const current = currentSessionId(ctx)
+      const all = (Array.isArray(open) ? open : []).filter((tab) => tab.kind === 'browser')
+      const rows = all.filter((tab) => current === undefined || tab.sessionId === undefined || tab.sessionId === current)
+      return { rows, all }
+    }
+
+    function findBrowserTab(ctx, rawId) {
+      const id = String(rawId)
+      const { rows, all } = browserTabs(ctx)
+      const hit = rows.find((tab) => String(tab.tabId ?? tab.id ?? '') === id)
+      if (hit !== undefined) return hit
+      const foreign = all.find((tab) => String(tab.tabId ?? tab.id ?? '') === id)
+      if (foreign !== undefined) {
+        throw new Error('Browser tab ' + JSON.stringify(id) + ' belongs to another Session than the one on screen; bring that Session on screen first.')
+      }
+      const available = rows.map((tab) => String(tab.tabId ?? tab.id ?? '')).filter((value) => value !== '')
+      throw new Error('No Browser tab ' + JSON.stringify(id) + ' is open for this Session'
+        + (available.length > 0 ? '; open tabs: ' + available.join(', ') : '. Use action "open" to create one.'))
     }
 
     async function executeCommand(state, command) {
@@ -782,43 +998,31 @@ window.__ModuleLoader__.load({
         const side = sidebarRightOf(ctx)
         if (side === undefined || side === null) throw new Error('The right Sidebar is unavailable in this Harness page, so a Browser tab cannot be opened (Desktop app required).')
         const existing = pickFrame(state, ctx)
-        /* A Browser tab already on screen is reused and navigated. A tab that is
-           hidden, or belongs to another Session, is not navigated: open a tab in
-           the current Session instead, which is what the person will see. */
-        if (existing !== undefined && frameIsVisible(existing)) {
+        const existingInfo = existing === undefined ? undefined : frameTabInfo(ctx, existing)
+        /* Reuse only a visible tab that belongs to this Session: navigating a
+           hidden or foreign tab would change a page the person cannot see. */
+        if (args.new_tab !== true && existing !== undefined && frameIsVisible(existing) && existingInfo.same !== false) {
           await navigateTo(existing, url)
           state.last = existing
           return { text: 'Opened ' + url + '\n' + statusText(ctx) }
         }
-        let opened
-        try {
-          opened = side.openTab('browser', { params: { url } })
-        } catch (error) {
-          throw new Error('Could not open the Browser tab: ' + (error instanceof Error ? error.message : String(error)))
-        }
-        if (opened !== undefined && opened !== null && typeof opened.then === 'function') {
-          await opened.catch(() => {})
-        }
-        /* Do not wait out a chain of long timeouts: a frame that appears does so
-           within a few seconds, and a missing one is reported instead of hanging
-           the tool call for a minute and a half. */
-        const deadline = Date.now() + 8000
-        while (Date.now() < deadline) {
-          const frame = pickFrame(state, ctx)
-          if (frame !== undefined) {
-            state.last = frame
-            await frameReady(frame, 5000).catch(() => {})
-            return { text: 'Opened ' + url + '\n' + statusText(ctx) }
-          }
-          await sleep(150)
-        }
+        const previousTab = activeBrowserTab(ctx)
+        const previousTabId = previousTab === undefined || previousTab.id === undefined || previousTab.id === null
+          ? undefined
+          : String(previousTab.id)
+        const opened = await openBrowserTab(ctx, url, args.new_tab === true ? previousTabId : undefined)
+        await frameReady(opened.frame, 8000).catch(() => {})
+        const ready = await waitPageReady(state, ctx, opened.frame, 15000, /^about:/i.test(url))
+        state.last = ready.frame
         return {
-          text: 'Requested a Browser tab at ' + url + ', but no frame appeared within 8s.\n'
-            + 'The tab may still be loading; call action "status" in a moment.\n' + statusText(ctx),
+          text: 'Opened ' + url + (opened.tabId === undefined ? '' : ' in Browser tab ' + opened.tabId) + '\n' + statusText(ctx),
         }
       }
 
-      const frame = await activeFrame(state, ctx, {})
+      /* Sidebar-only actions must work even when the visible right-Sidebar tab is
+         an editor/terminal and no single Browser frame can be chosen. */
+      const needsFrame = ['navigate', 'back', 'forward', 'reload', 'snapshot', 'read', 'diff', 'click', 'type', 'press', 'select', 'scroll', 'wait', 'eval', 'screenshot'].includes(action)
+      const frame = needsFrame ? await activeFrame(state, ctx, {}) : undefined
 
       switch (action) {
         case 'navigate': {
@@ -863,7 +1067,7 @@ window.__ModuleLoader__.load({
             ? 'Read ' + String(result.matched) + ' of ' + String(result.candidates) + ' matching passage(s) for ' + JSON.stringify(String(result.query)) + '.'
             : 'Read the visible text.'
           return {
-            text: header + '\n' + String(result.url) + '\n# ' + String(result.title)
+            text: header + ' · ' + sizeNote(result.text) + '\n' + String(result.url) + '\n# ' + String(result.title)
               + '\n\n' + String(result.text) + (result.truncated === true ? '\n…(truncated)' : ''),
           }
         }
@@ -874,6 +1078,7 @@ window.__ModuleLoader__.load({
           }
           return {
             text: (result.changed === true ? 'Changed since the previous diff.' : 'No visible change since the previous diff.')
+              + ' · ' + sizeNote(result.text)
               + '\n' + String(result.url) + '\n# ' + String(result.title)
               + (String(result.text).length > 0 ? '\n\n' + String(result.text) : ''),
           }
@@ -881,74 +1086,91 @@ window.__ModuleLoader__.load({
         case 'tabs': {
           const side = sidebarRightOf(ctx)
           if (side === undefined || side === null) throw new Error('The right Sidebar is unavailable in this Harness page.')
-          const open = safe(() => side.openTabs?.getSnapshot())
           const active = safe(() => side.active())
-          const rows = (Array.isArray(open) ? open : []).filter((tab) => tab.kind === 'browser')
-          if (rows.length === 0) return { text: 'No Browser tab is open. Use action "open" with a url.' }
+          const { rows, all } = browserTabs(ctx)
+          if (rows.length === 0) {
+            return { text: 'No Browser tab is open for this Session. Use action "open" with a url.'
+              + (all.length > 0 ? ' (' + String(all.length) + ' Browser tab(s) belong to other Sessions.)' : '') }
+          }
           const activeId = active === undefined || active === null ? undefined : String(active.id)
           const lines = rows.map((tab) => {
             const id = String(tab.tabId ?? tab.id ?? '')
             const holder = id === '' ? undefined : frameForTab({ id })
             const url = String(tab.url ?? tab.address ?? (holder === undefined ? '' : safe(() => holder.getURL())) ?? '')
             const title = String(tab.title ?? tab.label ?? (holder === undefined ? '' : safe(() => holder.getTitle())) ?? '')
-            const mark = activeId !== undefined && activeId === id ? '*' : ' '
+            const mark = activeId !== undefined && (activeId === id || activeId === String(tab.id ?? '')) ? '*' : ' '
             return mark + ' ' + id + '  ' + title + '  ' + url
           })
-          return { text: 'Browser tabs (' + String(rows.length) + ', * = active):\n' + lines.join('\n') }
+          const hidden = all.length - rows.length
+          return {
+            text: 'Browser tabs (' + String(rows.length) + ', * = active):\n' + lines.join('\n')
+              + (hidden > 0 ? '\n(' + String(hidden) + ' more belong to other Sessions and are hidden here.)' : ''),
+          }
         }
         case 'focus': {
           const side = sidebarRightOf(ctx)
           if (side === undefined || side === null) throw new Error('The right Sidebar is unavailable in this Harness page.')
-          side.focus(String(args.tab_id))
+          const target = findBrowserTab(ctx, args.tab_id)
+          side.focus(target.tabId ?? target.id)
           await sleep(250)
-          return { text: 'Focused Browser tab ' + String(args.tab_id) + '.\n' + statusText(ctx) }
+          return { text: 'Focused Browser tab ' + String(target.tabId ?? target.id) + '.\n' + statusText(ctx) }
         }
         case 'close_tab': {
           const side = sidebarRightOf(ctx)
           if (side === undefined || side === null) throw new Error('The right Sidebar is unavailable in this Harness page.')
-          side.close(String(args.tab_id))
+          const target = findBrowserTab(ctx, args.tab_id)
+          side.close(target.tabId ?? target.id)
           state.last = undefined
-          return { text: 'Closed Browser tab ' + String(args.tab_id) + '.' }
+          return { text: 'Closed Browser tab ' + String(target.tabId ?? target.id) + '.' }
         }
         case 'click': {
+          const before = activeBrowserTab(ctx)
+          const beforeId = before === undefined || before.id === undefined || before.id === null ? undefined : String(before.id)
           const outcome = await runPage(frame, pageClick, { ref: args.ref, selector: args.selector })
           await settleFast(frame)
+          const after = activeBrowserTab(ctx)
+          const afterId = after === undefined || after.id === undefined || after.id === null ? undefined : String(after.id)
+          const openedTab = afterId !== undefined && afterId !== beforeId ? afterId : ''
+          const active = openedTab === '' ? frame : (pickFrame(state, ctx) || frame)
+          state.last = active
           return {
             text: 'Clicked <' + outcome.clicked.tag + '> ' + JSON.stringify(outcome.clicked.label)
-              + '\nurl: ' + String(safe(() => frame.getURL()) || outcome.url)
-              + '\ntitle: ' + JSON.stringify(String(safe(() => frame.getTitle()) || ''))
+              + (openedTab === '' ? '' : '\nA new Browser tab opened: ' + openedTab)
+              + '\nurl: ' + String(safe(() => active.getURL()) || outcome.url)
+              + '\ntitle: ' + JSON.stringify(String(safe(() => active.getTitle()) || ''))
               + '\nTake a new snapshot before the next ref-based action.',
           }
         }
         case 'type': {
           const outcome = await runPage(frame, pageType, { ref: args.ref, selector: args.selector, text: args.text, submit: args.submit === true })
+          let submitted = ''
+          if (args.submit === true) {
+            if (outcome.submitted === 'enter') {
+              sendKey(frame, 'Enter')
+              submitted = ' Pressed Enter (the field is not inside a form).'
+            } else if (outcome.submitted === 'form') {
+              submitted = ' Submitted the form.'
+            }
+          }
           await settleFast(frame, { quietMs: 150 })
           return {
-            text: 'Typed ' + String(outcome.typed) + ' characters into <' + outcome.target + '>.'
-              + (args.submit === true ? ' Submitted the form.' : '')
+            text: 'Typed ' + String(outcome.typed) + ' characters into <' + outcome.target + '>.' + submitted
               + '\nurl: ' + String(safe(() => frame.getURL()) || outcome.url)
               + '\ntitle: ' + JSON.stringify(String(safe(() => frame.getTitle()) || '')),
           }
         }
         case 'press': {
           const key = String(args.key)
-          if (sendKey(frame, key) === 'dom') {
-            const outcome = await runPage(frame, pagePress, { key })
+          const modifiers = Array.isArray(args.modifiers) ? args.modifiers : []
+          const label = (modifiers.length > 0 ? modifiers.join('+') + '+' : '') + key
+          if (sendKey(frame, key, modifiers) === 'dom') {
+            const outcome = await runPage(frame, pagePress, { key, modifiers })
             await settleFast(frame, { quietMs: 120 })
-            return { text: 'Pressed ' + JSON.stringify(outcome.pressed) + ' on <' + outcome.active + '> (DOM event fallback).' }
-          }
-          if (key === 'Enter' || key === ' ' || key === 'Space') {
-            // Native key events drive page handlers; the DOM pass also submits a
-            // focused form when the guest swallowed the native default action.
-            try {
-              await runPage(frame, pagePress, { key })
-            } catch {
-              // The guest may already be navigating.
-            }
+            return { text: 'Pressed ' + JSON.stringify(label) + ' on <' + outcome.active + '> (DOM event fallback).' }
           }
           await settleFast(frame, { quietMs: 120 })
           return {
-            text: 'Pressed ' + JSON.stringify(key) + '.'
+            text: 'Pressed ' + JSON.stringify(label) + '.'
               + '\nurl: ' + String(safe(() => frame.getURL()) || '')
               + '\ntitle: ' + JSON.stringify(String(safe(() => frame.getTitle()) || '')),
           }
@@ -956,8 +1178,10 @@ window.__ModuleLoader__.load({
         case 'select': {
           const outcome = await runPage(frame, pageSelect, { ref: args.ref, selector: args.selector, value: args.value })
           await settleFast(frame, { quietMs: 120 })
-          return { text: 'Selected value ' + JSON.stringify(outcome.value) + ' (index ' + String(outcome.selectedIndex) + ').'
-            + '\ntitle: ' + JSON.stringify(String(safe(() => frame.getTitle()) || '')) }
+          return {
+            text: 'Selected ' + JSON.stringify(outcome.label) + ' (' + JSON.stringify(outcome.value) + ', index ' + String(outcome.selectedIndex) + ').'
+              + '\nurl: ' + String(safe(() => frame.getURL()) || ''),
+          }
         }
         case 'scroll': {
           const outcome = await runPage(frame, pageScroll, {
@@ -966,22 +1190,58 @@ window.__ModuleLoader__.load({
             direction: args.direction,
             amount: args.amount,
           })
-          return { text: 'Scrolled to y=' + String(outcome.y === undefined ? '?' : outcome.y) }
+          const parts = ['Scrolled to y=' + String(outcome.y === undefined ? '?' : outcome.y)]
+          if (outcome.x !== undefined && outcome.x !== 0) parts.push('x=' + String(outcome.x))
+          if (outcome.target !== undefined) parts.push('target <' + outcome.target.tag + '>')
+          if (outcome.rectTop !== undefined) parts.push('viewport top=' + String(outcome.rectTop))
+          if (outcome.moved === false) parts.push('(already at that position)')
+          return { text: parts.join(' ') }
         }
         case 'wait': {
-          const outcome = await runPage(frame, pageWait, {
-            selector: args.selector,
-            text: args.text,
-            timeoutMs: Number(args.timeout_ms) > 0 ? Number(args.timeout_ms) : 5000,
-          })
+          const timeoutMs = Number(args.timeout_ms) > 0 ? Number(args.timeout_ms) : 5000
+          const outcome = await waitFor(frame, { selector: args.selector, text: args.text }, timeoutMs)
           return { text: 'Appeared: ' + JSON.stringify(outcome) }
         }
         case 'eval': {
           const script = String(args.script)
-          const code = '(async () => { const value = (' + script + '); const resolved = await value;'
-            + ' try { return JSON.parse(JSON.stringify(resolved === undefined ? null : resolved)) } catch { return String(resolved) } })()'
-          const value = await frame.executeJavaScript(code, true)
-          const text = JSON.stringify(value, null, 2)
+          const serialize = '(value) => {'
+            + ' if (value === undefined) return null;'
+            + ' if (value !== null && typeof value === "object" && typeof value.nodeType === "number") {'
+            + '   return { node: String(value.nodeName || ""), text: String(value.innerText !== undefined && value.innerText !== null ? value.innerText : (value.textContent || "")).slice(0, 4000), ...(typeof value.value === "string" ? { value: value.value.slice(0, 500) } : {}) };'
+            + ' }'
+            + ' if (typeof value === "function") return String(value);'
+            + ' if (typeof value === "bigint" || typeof value === "symbol") return String(value);'
+            + ' const seen = new WeakSet();'
+            + ' try { const json = JSON.stringify(value, (key, item) => { if (item !== null && typeof item === "object") { if (seen.has(item)) return "[circular]"; seen.add(item) } return item }); return json === undefined ? String(value) : JSON.parse(json) } catch { return String(value) }'
+            + ' }'
+          const wrap = (body) => '(async () => { try { const __v = await (' + body + '); return { ok: true, value: (' + serialize + ')(__v) } }'
+            + ' catch (error) { return { ok: false, name: error && error.name ? String(error.name) : "Error", message: error && error.message ? String(error.message) : String(error) } } })()'
+          /* eval() returns the completion value, so expressions and statement
+             blocks both work; a page CSP may forbid it, in which case a plain
+             expression is still evaluated. */
+          let outcome = await frame.executeJavaScript(wrap('(0, eval)(' + JSON.stringify(script) + ')'), true)
+          const failed = outcome === null || typeof outcome !== 'object' || outcome.ok !== true
+          if (failed) {
+            const name = outcome !== null && typeof outcome === 'object' ? String(outcome.name || '') : ''
+            const message = outcome !== null && typeof outcome === 'object' ? String(outcome.message || '') : 'the page returned no value'
+            if (/EvalError|Content Security Policy|unsafe-eval/i.test(name + ' ' + message)) {
+              try {
+                outcome = await frame.executeJavaScript(wrap('(' + script + ')'), true)
+              } catch {
+                throw new Error('This page\'s Content Security Policy blocks eval(), so only a single expression can be evaluated here. '
+                  + 'Pass an expression, or use read/snapshot instead.')
+              }
+            } else if (/SyntaxError/i.test(name) || /SyntaxError/i.test(message)) {
+              throw new Error('The script could not be parsed: ' + message + '. Pass an expression or a statement block.')
+            } else {
+              throw new Error(message)
+            }
+          }
+          if (outcome === null || typeof outcome !== 'object' || outcome.ok !== true) {
+            const message = outcome !== null && typeof outcome === 'object' ? String(outcome.message || '') : 'the page returned no value'
+            throw new Error(message)
+          }
+          const text = JSON.stringify(outcome.value, null, 2)
           return { text: text.length > 20000 ? text.slice(0, 20000) + '\n(truncated)' : text }
         }
         case 'screenshot': {
@@ -990,7 +1250,8 @@ window.__ModuleLoader__.load({
              Browser panel to the front. */
           await revealFrame(ctx, frame)
           const image = await capture(frame)
-          const text = 'Captured the visible Browser page.\n' + statusText(ctx)
+          const note = args.full_page === true ? 'Full-page capture is not supported yet; captured the visible viewport.\n' : ''
+          const text = note + 'Captured the visible Browser page.\n' + statusText(ctx)
           return { text, png: image }
         }
         case 'close': {
@@ -1025,6 +1286,7 @@ window.__ModuleLoader__.load({
           const started = Date.now()
           const lines = []
           let failed = ''
+          let ran = 0
           for (let index = 0; index < steps.length; index += 1) {
             const step = steps[index] !== null && typeof steps[index] === 'object' ? steps[index] : {}
             const sub = String(step.action || '')
@@ -1034,16 +1296,22 @@ window.__ModuleLoader__.load({
             }
             try {
               const result = await executeCommand(state, { action: sub, args: step })
-              const summary = String(result?.text || '').split('\n').filter((line) => line !== '').slice(0, 3).join(' · ')
-              lines.push(String(index + 1) + '. ' + sub + ': ' + summary.slice(0, 300))
+              ran += 1
+              const raw = String(result?.text || '')
+              /* A read/diff/snapshot in a batch is usually the point of the
+                 batch, so keep its payload; other steps only need a summary. */
+              const text = ['read', 'diff', 'snapshot'].includes(sub)
+                ? raw.slice(0, 3000) + (raw.length > 3000 ? '…' : '')
+                : raw.split('\n').filter((line) => line !== '').slice(0, 3).join(' · ').slice(0, 300)
+              lines.push(String(index + 1) + '. ' + sub + ': ' + text)
             } catch (error) {
               failed = 'step ' + String(index + 1) + ' (' + sub + '): ' + (error instanceof Error ? error.message : String(error))
               break
             }
           }
           return {
-            text: 'Batch ' + String(steps.length) + ' step(s) in ' + String(Date.now() - started) + ' ms.'
-              + (failed === '' ? '' : '\nfailed: ' + failed)
+            text: 'Batch: ' + String(ran) + ' of ' + String(steps.length) + ' step(s) ran in ' + String(Date.now() - started) + ' ms.'
+              + (failed === '' ? '' : '\nfailed: ' + failed + ' (remaining steps not run)')
               + '\n' + lines.join('\n'),
           }
         }
@@ -1107,7 +1375,11 @@ window.__ModuleLoader__.load({
               if (signal.aborted || state.running === false) return
               let message
               try {
-                message = { ok: true, value: await withDeadline(executeCommand(state, command), 45000, 'The action "' + String(command.action) + '"') }
+                /* Give up a few seconds before the host deadline so the failure
+                   is a readable client message instead of a host timeout. */
+                const budget = Number(command.deadlineMs) > 0 ? Number(command.deadlineMs) : DEFAULT_ACTION_BUDGET_MS
+                const closed = Math.max(5000, Math.min(budget - 5000, MAX_ACTION_BUDGET_MS))
+                message = { ok: true, value: await withDeadline(executeCommand(state, command), closed, 'The action "' + String(command.action) + '"') }
               } catch (error) {
                 message = {
                   ok: false,
@@ -1116,8 +1388,9 @@ window.__ModuleLoader__.load({
               }
               try {
                 await post('result', { instance, commandId: command.id, ...message }, signal)
-              } catch {
+              } catch (error) {
                 // The Host may have timed the command out; the next poll recovers.
+                console.warn('[sidebar-control] the result could not be delivered', error)
               }
             }
           } catch (error) {

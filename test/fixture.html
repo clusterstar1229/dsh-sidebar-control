@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DSH Browser Fixture</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 24px; max-width: 760px; }
+  .row { margin: 10px 0; }
+  #delayed { padding: 8px; border: 1px dashed #999; min-height: 1.5em; }
+  .spacer { height: 2400px; background: linear-gradient(#fff, #eef); }
+  #tall-target { margin-top: 32px; }
+</style>
+</head>
+<body>
+<h1 id="heading">DSH Browser Fixture</h1>
+<p id="intro">A deterministic page for exercising every browser-control action: typing, selecting, clicking, waiting, scrolling, diffing and reading.</p>
+
+<div class="row"><label for="name">Name</label> <input id="name" name="name" placeholder="Your name" autocomplete="off"></div>
+<div class="row"><button id="greet" type="button" onclick="document.getElementById('out').textContent = 'Hello ' + document.getElementById('name').value.trim()">Greet</button></div>
+<p id="out">No greeting yet.</p>
+
+<div class="row"><label for="notes">Notes</label><br><textarea id="notes" rows="3" cols="50" placeholder="Free text"></textarea></div>
+
+<div class="row"><label for="fruit">Fruit</label>
+  <select id="fruit" name="fruit">
+    <option value="apple">Apple</option>
+    <option value="banana">Banana</option>
+    <option value="cherry">Cherry</option>
+    <option value="dragonfruit">Dragon fruit</option>
+  </select>
+  <span id="fruit-out"></span>
+</div>
+
+<div class="row"><label><input id="agree" type="checkbox" name="agree"> I agree</label> <span id="agree-out"></span></div>
+
+<div class="row"><a id="next" href="fixture2.html">Go to page two</a></div>
+<div class="row"><a id="blank" href="fixture2.html" target="_blank" rel="noopener">Open page two in a new tab</a></div>
+
+<div class="row"><input id="keys" placeholder="Focus me and press keys"><div id="keylog">(no keys)</div></div>
+
+<div class="row"><details><summary id="summary">More details</summary><p id="details-body">Hidden detail text becomes visible after expanding.</p></details></div>
+
+<div class="row"><div id="editable" contenteditable="true" style="border:1px solid #ccc;padding:6px">editable text</div></div>
+
+<div class="row"><button id="inc" type="button" onclick="window.__fixtureRoll = (window.__fixtureRoll || 0) + 1; document.getElementById('roll').textContent = String(window.__fixtureRoll)">Roll</button> <span id="roll">0</span></div>
+
+<div class="row" id="delayed">waiting…</div>
+
+<div class="spacer"></div>
+<h2 id="tall-target">End of the long page</h2>
+<p>Bottom paragraph with the unique phrase: zanzibar-quartz.</p>
+
+<script>
+  document.getElementById('fruit').addEventListener('change', function () {
+    document.getElementById('fruit-out').textContent = 'picked=' + this.value;
+  });
+  document.getElementById('agree').addEventListener('change', function () {
+    document.getElementById('agree-out').textContent = this.checked ? 'agreed' : 'not agreed';
+  });
+  document.getElementById('keys').addEventListener('keydown', function (event) {
+    document.getElementById('keylog').textContent = 'last key=' + event.key;
+  });
+  setTimeout(function () {
+    document.getElementById('delayed').textContent = 'Delayed content ready';
+  }, 1200);
+</script>
+</body>
+</html>
