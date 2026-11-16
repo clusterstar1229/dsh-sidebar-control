@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Hover Fixture</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 24px; }
+  #hbtn { background: rgb(221, 221, 221); padding: 8px 16px; border: 1px solid #888; }
+  #hbtn:hover { background: rgb(255, 0, 0); }
+  #menu { display: none; padding: 8px; border: 1px dashed #888; width: 160px; }
+  #menu.open { display: block; }
+</style></head>
+<body>
+<h1>Hover Fixture</h1>
+<button id="hbtn">Hover me</button>
+<div id="menu"><button id="menuitem">Menu item</button></div>
+<p id="hovercount">mouseenter count: 0</p>
+<script>
+  let count = 0
+  const btn = document.getElementById('hbtn')
+  btn.addEventListener('mouseenter', () => {
+    count += 1
+    document.getElementById('hovercount').textContent = 'mouseenter count: ' + String(count)
+    document.getElementById('menu').classList.add('open')
+  })
+  document.getElementById('menuitem').addEventListener('click', () => {
+    document.getElementById('hovercount').textContent = 'menu item clicked'
+  })
+</script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Shadow DOM Fixture</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;margin:24px;max-width:720px}</style></head>
+<body>
+<h1>Shadow DOM Fixture</h1>
+<p>Light DOM text: apples and pears.</p>
+<div id="host"></div>
+<p id="out">no click yet</p>
+<script>
+  const host = document.getElementById('host')
+  const root = host.attachShadow({ mode: 'open' })
+  root.innerHTML = `
+    <div style="border:1px solid #999;padding:12px;margin:12px 0">
+      <button id="sbtn">Shadow Button</button>
+      <input id="sinput" placeholder="shadow input">
+      <p id="stext">Shadow secret: kumquat-42. This paragraph lives inside an open shadow root.</p>
+    </div>`
+  root.querySelector('#sbtn').addEventListener('click', () => {
+    document.getElementById('out').textContent = 'shadow button clicked'
+  })
+</script>
+</body>
+</html>

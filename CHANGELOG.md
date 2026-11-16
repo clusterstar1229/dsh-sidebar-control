@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.2.2 — 2026-11-16
+
+Interaction and layout coverage; live-tested on the real panel (hover/click, open shadow DOM, stitched full
+page, single-line reads, relative paths).
+
+### Added
+
+- `hover` (ref|selector) scrolls the element into view and sends a native mouseMove, so CSS `:hover` menus
+  open; synthetic events are used only when the native pointer is unavailable. `batch` accepts `hover`.
+- `snapshot`, `read`, `click`, `type`, `scroll`, `wait` and `select` now traverse **open shadow roots**; refs
+  use a per-snapshot element registry (data attribute as fallback), and shadow text is collected from visible
+  nodes only (style/script/hidden nodes skipped).
+- `screenshot` gains `full_page` (scrolls viewport tiles, stitches them on a canvas, restores the original
+  scroll position, caps at 20,000 px / 30 tiles) and `max_width` (downscales long captures).
+- `select` accepts a 0-based `index` as an alternative to value/label.
+- `type` accepts `clear: false` to append instead of replacing.
+- `open` / `navigate` accept page-relative paths (`/settings`, `./next`, `?q=1`, `#top`) resolved against the
+  current page; a relative `open` with no open page explains the problem.
+- `read` splits a single-line/minified page into sentence-sized chunks (CJK punctuation included) and, when a
+  query matches nothing, returns the page opening with a clear "no passage matched" header.
+
+### Fixed
+
+- Hover could fire `mouseenter` twice (synthetic plus native); the native pointer is now the only source when
+  it works.
+- Shadow-root text included `<style>` and hidden content; it is filtered to visible text nodes.
+- Invalid CSS selectors now fail with "Invalid CSS selector …" in `click`/`type`/`hover`/`scroll` and in
+  `wait` (instead of a 5-second timeout).
+- Full-page captures are downscaled when the base64 payload would exceed the result body limit.
+
+### Tests
+
+- New fixtures `test/hover.html`, `test/shadow.html`, `test/singleline.html`; the 0.2.2 campaign lives in
+  [`test/campaign-0.2.2.md`](test/campaign-0.2.2.md).
+
 ## 0.2.1 — 2026-11-08
 
 Live browser-control campaign (90+ actions against the real sidebar Browser; fixture pages, Bing, DeepSeek,
