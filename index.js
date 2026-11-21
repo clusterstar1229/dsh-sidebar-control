@@ -77,6 +77,14 @@ const PARAMETERS = {
       type: 'boolean',
       description: 'For "snapshot": set false to return only the numbered refs (cheaper when you only need controls).',
     },
+    all: {
+      type: 'boolean',
+      description: 'For "tabs": also list Browser tabs that belong to other conversations, with the owning Session id. Default false.',
+    },
+    prune: {
+      type: 'boolean',
+      description: 'For "tabs": close this conversation\'s blank Browser tabs (about:blank or never loaded). Other conversations are untouched.',
+    },
     steps: {
       type: 'array',
       description: 'For "batch": steps run in order in one call. Each step is an object with an "action" plus that action\'s arguments (navigate/click/hover/type/press/select/scroll/wait/eval/read/diff/snapshot). The batch stops at the first failure.',
@@ -198,6 +206,11 @@ The \`builtin_browser\` tool drives the Browser panel in the Harness right Sideb
 Use it when a task needs a live page: signing in, filling forms, clicking through a UI, or reading content
 that only renders after scripts run. Prefer \`web_fetch\` for plain reading without interaction.
 
+Every tab belongs to the conversation that opened it: \`open\` creates the tab inside the calling Session's own
+layout, \`tabs\` lists only this conversation's tabs (pass \`all: true\` to see others, each labelled with its
+owner), and \`focus\` / \`close_tab\` / \`close\` never touch another conversation's page. Several conversations can
+drive the sidebar at the same time without mixing their tab strips.
+
 Workflow: \`status\` or \`open\` first, then \`snapshot\` for page text and numbered refs, then
 \`click\`/\`type\`/\`press\`/\`select\` with those refs. On a long page, \`read\` with a \`query\` returns only the
 passages that answer it, and \`diff\` returns only what changed since the previous diff — both are much cheaper
@@ -268,7 +281,7 @@ function pickArgs(raw) {
     throw new Error(`unknown action ${JSON.stringify(String(args.action ?? ''))}; expected one of ${[...ACTIONS].join(', ')}`)
   }
   const picked = { action }
-  for (const key of ['url', 'ref', 'selector', 'text', 'key', 'value', 'index', 'script', 'direction', 'amount', 'submit', 'clear', 'full_page', 'max_width', 'max_text_chars', 'max_refs', 'timeout_ms', 'query', 'max_chars', 'tab_id', 'include_text', 'steps', 'modifiers', 'new_tab']) {
+  for (const key of ['url', 'ref', 'selector', 'text', 'key', 'value', 'index', 'script', 'direction', 'amount', 'submit', 'clear', 'full_page', 'max_width', 'max_text_chars', 'max_refs', 'timeout_ms', 'query', 'max_chars', 'tab_id', 'include_text', 'all', 'prune', 'steps', 'modifiers', 'new_tab']) {
     if (args[key] !== undefined && args[key] !== null) picked[key] = args[key]
   }
   return picked
@@ -583,7 +596,7 @@ export function apply(ctx) {
     description:
       'Operate the Browser panel in the right Sidebar of DeepSeek Harness. '
       + 'Actions: status, open (url, new_tab?), navigate (url), back, forward, reload, snapshot (include_text?), read (query?, max_chars?), '
-      + 'diff (max_chars?), batch (steps: several actions in one call), tabs, focus (tab_id), close_tab (tab_id), click (ref|selector), '
+      + 'diff (max_chars?), batch (steps: several actions in one call), tabs (all?, prune?), focus (tab_id), close_tab (tab_id), click (ref|selector), '
       + 'hover (ref|selector), type (ref|selector, text, submit?, clear?), press (key, modifiers?), select (ref|selector, value|index), '
       + 'scroll (selector|ref|direction|amount), wait (selector|text), eval (script), screenshot (full_page?, max_width?), close. '
       + '"hover" reveals menus and tooltips before a click. '
@@ -624,7 +637,7 @@ export function apply(ctx) {
         : args.action === 'screenshot'
           ? Math.min(requested ?? (args.full_page === true ? 60000 : 30000), 75000)
           : (requested ?? DEFAULT_TIMEOUT_MS)
-      const command = { id: randomUUID(), action: args.action, args, deadlineMs: timeoutMs }
+      const command = { id: randomUUID(), action: args.action, args, deadlineMs: timeoutMs, sessionId: exec.agent?.id === undefined ? undefined : String(exec.agent.id) }
       const raw = await dispatch(command, exec, timeoutMs)
       const value = { text: typeof raw?.text === 'string' ? raw.text : JSON.stringify(raw) }
       if (args.action === 'screenshot') {

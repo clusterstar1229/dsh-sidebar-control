@@ -14,7 +14,7 @@ window.__ModuleLoader__.load({
     const POLL_WAIT_MS = 25000
     const FRAME_SELECTOR = 'webview[data-sidebar-browser-frame]'
     const LIST_LIMIT = 120
-    const VERSION = '0.2.2'
+    const VERSION = '0.2.3'
     const DEFAULT_ACTION_BUDGET_MS = 85000
     const MAX_ACTION_BUDGET_MS = 295000
     /* Actions a batch may contain. A batch is one tool call for several steps,
@@ -806,13 +806,14 @@ window.__ModuleLoader__.load({
      * Ask the right Sidebar for a Browser tab and wait until *its* frame exists.
      * Foreign Session frames are ignored: they are not the tab we just asked for.
      */
-    async function openBrowserTab(ctx, url, previousTabId) {
+    async function openBrowserTab(ctx, url, previousTabId, sessionId) {
       const sidebarRight = sidebarRightOf(ctx)
       if (sidebarRight === undefined || sidebarRight === null) {
         throw new Error('The right Sidebar is unavailable in this Harness page, so a Browser tab cannot be opened (Desktop app required for Browser control).')
       }
+      let opened
       try {
-        sidebarRight.openTab('browser', { params: { url } })
+        opened = openTabInSession(ctx, sessionId, 'browser', { url })
       } catch (error) {
         throw new Error('Could not open the right-Sidebar Browser: ' + (error instanceof Error ? error.message : String(error)))
       }
@@ -823,12 +824,13 @@ window.__ModuleLoader__.load({
         const own = browserFrames().filter((frame) => frameTabInfo(ctx, frame).same !== false)
         const exact = tab === undefined ? undefined : frameForTab(tab)
         const fresh = previousTabId === undefined || tabId === undefined || tabId !== previousTabId
-        if (exact !== undefined && fresh) return { frame: exact, tabId }
+        if (exact !== undefined && fresh) return { frame: exact, tabId, targeted: opened.targeted }
         const visible = own.filter(frameIsVisible)
-        if (visible.length > 0 && fresh) return { frame: visible[visible.length - 1], tabId }
+        if (visible.length > 0 && fresh) return { frame: visible[visible.length - 1], tabId, targeted: opened.targeted }
         await sleep(150)
       }
-      throw new Error('A Browser tab was requested for ' + url + ' but no Browser frame appeared within 20s. '
+      throw new Error('A Browser tab was requested for ' + url + ' in Session ' + String(sessionId ?? '(unknown)')
+        + ' but no Browser frame appeared within 20s. '
         + 'The tab may still be loading; call action "status" in a moment.')
     }
 
@@ -906,9 +908,30 @@ window.__ModuleLoader__.load({
       }
       if (!frameIsVisible(frame)) {
         const active = safe(() => sidebarRight?.active())
+        const hint = active === undefined
+          ? ''
+          : ' Active right-Sidebar tab: ' + String(active.kind) + ' ' + String(active.id) + '.'
         throw new Error('The Browser tab is hidden (collapsed, inert, or another tab is in front), so a screenshot would be blank.'
-          + (active === undefined ? '' : ' Active right-Sidebar tab: ' + String(active.kind) + ' ' + String(active.id) + '.')
-          + ' Open the Browser panel visibly, then retry.')
+          + hint + ' Open the Browser panel visibly, then retry.')
+      }
+    }
+
+    /**
+     * Make the tab visible before capturing, and tell the person how.
+     *
+     * A screenshot of a hidden tab is blank, so the capture has to be shown
+     * rather than silently returning an empty image. This expands the right
+     * Sidebar and focuses the owner tab; when that is impossible it says which
+     * tab to bring forward instead of a bare "hidden" error.
+     */
+    async function revealForCapture(ctx, frame) {
+      try {
+        await revealFrame(ctx, frame)
+        return true
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        throw new Error(message + '\nTip: action "snapshot" or "read" works without showing the panel — '
+          + 'use it when you only need the page content, and keep "screenshot" for a visible panel.')
       }
     }
 
@@ -1108,12 +1131,14 @@ window.__ModuleLoader__.load({
       return lines.join('\n')
     }
 
-    function statusText(ctx) {
+    function statusText(ctx, caller) {
       const frames = browserFrames()
       const sidebarRight = sidebarRightOf(ctx)
       const lines = []
       lines.push('plugin: ' + VERSION)
       lines.push('platform: ' + (globalThis.dshDesktop === undefined ? 'web' : 'desktop'))
+      if (typeof caller === 'string' && caller.length > 0) lines.push('callingSession: ' + shortSession(caller))
+      lines.push('onScreenSession: ' + shortSession(currentSessionId(ctx)))
       lines.push('browserFrames: ' + String(frames.length))
       let activeTab
       if (sidebarRight !== undefined && sidebarRight !== null && typeof sidebarRight.active === 'function') {
@@ -1133,6 +1158,9 @@ window.__ModuleLoader__.load({
           + (info.same ? '' : ' (Session ' + String(info.frameSession) + ' is not the one on screen)'))
       })
       if (frames.length === 0) lines.push('No Browser frame is mounted. Use action "open" with a url to create the tab.')
+      const own = browserTabs(ctx, caller).rows
+      const every = browserTabs(ctx, caller).all
+      lines.push('tabs: ' + String(own.length) + ' in this conversation, ' + String(Math.max(0, every.length - own.length)) + ' in other conversations')
       return lines.join('\n')
     }
 
@@ -1322,29 +1350,74 @@ window.__ModuleLoader__.load({
         ?? (active === undefined || active === null ? undefined : active.sessionId)
     }
 
-    /** Browser tabs split into "this Session" and "all" so tab ids with the same
-        value in another Session are never silently focused or closed. */
-    function browserTabs(ctx) {
-      const side = sidebarRightOf(ctx)
-      const open = side === undefined || side === null ? undefined : safe(() => side.openTabs?.getSnapshot())
-      const current = currentSessionId(ctx)
-      const all = (Array.isArray(open) ? open : []).filter((tab) => tab.kind === 'browser')
-      const rows = all.filter((tab) => current === undefined || tab.sessionId === undefined || tab.sessionId === current)
-      return { rows, all }
+    /** The Session that issued the command: the tool call's own agent id. */
+    function callerSessionId(state, ctx) {
+      const stated = state.caller
+      return typeof stated === 'string' && stated.length > 0 ? stated : currentSessionId(ctx)
     }
 
-    function findBrowserTab(ctx, rawId) {
+    /**
+     * Open a Browser tab INSIDE a named Session's layout.
+     *
+     * `sidebarRight.openTab(kind, …)` targets the Session currently on screen —
+     * that is Harness behaviour, not ours — so a second conversation running in
+     * the background would otherwise drop its tab into whatever conversation the
+     * person happens to be looking at, and every conversation's tab strip would
+     * fill with everyone else's tabs. `openTabIn(sessionId, kind, …)` writes the
+     * target Session's own layout instead, which is what this call needs.
+     */
+    function openTabInSession(ctx, sessionId, kind, params) {
+      const sidebarRight = sidebarRightOf(ctx)
+      if (sidebarRight === undefined || sidebarRight === null) {
+        throw new Error('The right Sidebar is unavailable in this Harness page, so a Browser tab cannot be opened (Desktop app required).')
+      }
+      const options = params === undefined ? {} : { params }
+      if (sessionId !== undefined && typeof sidebarRight.openTabIn === 'function') {
+        try {
+          sidebarRight.openTabIn(sessionId, kind, options)
+          return { targeted: true, via: 'openTabIn' }
+        } catch (error) {
+          if (!/no session surface is mounted|not mounted/i.test(String(error && error.message))) throw error
+        }
+      }
+      /* No adopted surface for that Session (it was never on screen in this
+         process): fall back to the on-screen one and say so in the result. */
+      sidebarRight.openTab(kind, options)
+      return { targeted: false, via: 'openTab' }
+    }
+
+    /** Browser tabs split into "this Session" and "all" so tab ids with the same
+        value in another Session are never silently focused or closed. */
+    function browserTabs(ctx, sessionId) {
+      const side = sidebarRightOf(ctx)
+      const open = side === undefined || side === null ? undefined : safe(() => side.openTabs?.getSnapshot())
+      const current = sessionId ?? currentSessionId(ctx)
+      const all = (Array.isArray(open) ? open : []).filter((tab) => tab.kind === 'browser')
+      const rows = all.filter((tab) => current === undefined || tab.sessionId === undefined || tab.sessionId === current)
+      return { rows, all, sessionId: current }
+    }
+
+    function findBrowserTab(ctx, rawId, sessionId) {
       const id = String(rawId)
-      const { rows, all } = browserTabs(ctx)
+      const { rows, all } = browserTabs(ctx, sessionId)
       const hit = rows.find((tab) => String(tab.tabId ?? tab.id ?? '') === id)
       if (hit !== undefined) return hit
       const foreign = all.find((tab) => String(tab.tabId ?? tab.id ?? '') === id)
       if (foreign !== undefined) {
-        throw new Error('Browser tab ' + JSON.stringify(id) + ' belongs to another Session than the one on screen; bring that Session on screen first.')
+        throw new Error('Browser tab ' + JSON.stringify(id) + ' belongs to another conversation (Session '
+          + String(foreign.sessionId) + '); it is left alone. Use action "open" to get a tab of your own, '
+          + 'or action "tabs" with all:true to see it.')
       }
       const available = rows.map((tab) => String(tab.tabId ?? tab.id ?? '')).filter((value) => value !== '')
-      throw new Error('No Browser tab ' + JSON.stringify(id) + ' is open for this Session'
+      throw new Error('No Browser tab ' + JSON.stringify(id) + ' is open for this conversation'
         + (available.length > 0 ? '; open tabs: ' + available.join(', ') : '. Use action "open" to create one.'))
+    }
+
+    /** Short, stable label so a person can tell which conversation owns a tab. */
+    function shortSession(sessionId) {
+      const raw = String(sessionId ?? '')
+      if (raw.length === 0) return 'unknown'
+      return raw.length <= 10 ? raw : raw.slice(-6)
     }
 
     async function executeCommand(state, command) {
@@ -1352,12 +1425,13 @@ window.__ModuleLoader__.load({
       const args = command.args !== null && typeof command.args === 'object' ? command.args : {}
       const ctx = state.ctx
 
-      if (action === 'status') return { text: statusText(ctx) }
+      if (action === 'status') return { text: statusText(ctx, callerSessionId(state, ctx)) }
 
       if (action === 'open') {
         const requested = String(args.url || '')
         const side = sidebarRightOf(ctx)
         if (side === undefined || side === null) throw new Error('The right Sidebar is unavailable in this Harness page, so a Browser tab cannot be opened (Desktop app required).')
+        const mine = callerSessionId(state, ctx)
         const existing = pickFrame(state, ctx)
         const existingInfo = existing === undefined ? undefined : frameTabInfo(ctx, existing)
         const base = existing !== undefined ? existing : pickFrame(state, ctx)
@@ -1365,23 +1439,27 @@ window.__ModuleLoader__.load({
         if (!/^(https?|file|about):/i.test(url) && /^(\/|\.\/|\.\.\/|[?#])/.test(url)) {
           throw new Error('The relative URL ' + JSON.stringify(requested) + ' needs an open Browser page to resolve against; open an absolute URL first.')
         }
-        /* Reuse only a visible tab that belongs to this Session: navigating a
-           hidden or foreign tab would change a page the person cannot see. */
+        /* Reuse only a visible tab that belongs to this conversation: navigating a
+           hidden or foreign tab would change a page the person cannot see, and
+           would mix one conversation's page into another's tab strip. */
         if (args.new_tab !== true && existing !== undefined && frameIsVisible(existing) && existingInfo.same !== false) {
           await navigateTo(existing, url)
           state.last = existing
-          return { text: 'Opened ' + url + '\n' + statusText(ctx) }
+          return { text: 'Opened ' + url + '\n' + statusText(ctx, mine) }
         }
         const previousTab = activeBrowserTab(ctx)
         const previousTabId = previousTab === undefined || previousTab.id === undefined || previousTab.id === null
           ? undefined
           : String(previousTab.id)
-        const opened = await openBrowserTab(ctx, url, args.new_tab === true ? previousTabId : undefined)
+        const opened = await openBrowserTab(ctx, url, args.new_tab === true ? previousTabId : undefined, mine)
         await frameReady(opened.frame, 8000).catch(() => {})
         const ready = await waitPageReady(state, ctx, opened.frame, 15000, /^about:/i.test(url))
         state.last = ready.frame
+        const owner = opened.targeted === true
+          ? ' (in this conversation)'
+          : ' (this Harness page has no live layout for chat ' + shortSession(mine) + ', so the tab landed in the conversation on screen)'
         return {
-          text: 'Opened ' + url + (opened.tabId === undefined ? '' : ' in Browser tab ' + opened.tabId) + '\n' + statusText(ctx),
+          text: 'Opened ' + url + (opened.tabId === undefined ? '' : ' in Browser tab ' + opened.tabId) + owner + '\n' + statusText(ctx, mine),
         }
       }
 
@@ -1394,27 +1472,27 @@ window.__ModuleLoader__.load({
         case 'navigate': {
           const url = resolveUrl(frame, String(args.url || ''))
           await navigateTo(frame, url)
-          return { text: 'Navigated to ' + url + '\n' + statusText(ctx) }
+          return { text: 'Navigated to ' + url + '\n' + statusText(ctx, callerSessionId(state, ctx)) }
         }
         case 'back': {
           if (safe(() => frame.canGoBack()) !== true) throw new Error('The Browser tab has no back history.')
           safe(() => frame.goBack())
           await settle(frame, 200)
           await frameReady(frame, 10000)
-          return { text: 'Went back.\n' + statusText(ctx) }
+          return { text: 'Went back.\n' + statusText(ctx, callerSessionId(state, ctx)) }
         }
         case 'forward': {
           if (safe(() => frame.canGoForward()) !== true) throw new Error('The Browser tab has no forward history.')
           safe(() => frame.goForward())
           await settle(frame, 200)
           await frameReady(frame, 10000)
-          return { text: 'Went forward.\n' + statusText(ctx) }
+          return { text: 'Went forward.\n' + statusText(ctx, callerSessionId(state, ctx)) }
         }
         case 'reload': {
           safe(() => frame.reload())
           await settle(frame, 250)
           await frameReady(frame, 15000)
-          return { text: 'Reloaded the page.\n' + statusText(ctx) }
+          return { text: 'Reloaded the page.\n' + statusText(ctx, callerSessionId(state, ctx)) }
         }
         case 'snapshot': {
           const snapshot = await runPage(frame, pageSnapshot, {
@@ -1455,41 +1533,103 @@ window.__ModuleLoader__.load({
           const side = sidebarRightOf(ctx)
           if (side === undefined || side === null) throw new Error('The right Sidebar is unavailable in this Harness page.')
           const active = safe(() => side.active())
-          const { rows, all } = browserTabs(ctx)
-          if (rows.length === 0) {
-            return { text: 'No Browser tab is open for this Session. Use action "open" with a url.'
-              + (all.length > 0 ? ' (' + String(all.length) + ' Browser tab(s) belong to other Sessions.)' : '') }
+          const mine = callerSessionId(state, ctx)
+          const { rows, all } = browserTabs(ctx, mine)
+          /* A long conversation accumulates one Browser tab per `open`, and a
+             blank one (about:blank, no title) is never useful again. `prune`
+             closes those of THIS conversation only. */
+          if (args.prune === true) {
+            const doomed = rows.filter((tab) => {
+              const id = String(tab.tabId ?? tab.id ?? '')
+              const holder = id === '' ? undefined : frameForTab({ id })
+              const url = String(tab.url ?? tab.address ?? (holder === undefined ? '' : safe(() => holder.getURL())) ?? '')
+              return url === '' || url === 'about:blank' || /^about:blank#/.test(url)
+            })
+            const closed = []
+            for (const tab of doomed) {
+              const id = String(tab.tabId ?? tab.id ?? '')
+              const owner = tab.sessionId ?? mine
+              try {
+                if (owner !== undefined && typeof side.closeIn === 'function') side.closeIn(owner, id)
+                else side.close(id)
+                closed.push(id)
+              } catch {
+                // A tab that cannot be closed now (mid-load) is skipped.
+              }
+            }
+            if (closed.length > 0) state.last = undefined
+            return {
+              text: 'Pruned ' + String(closed.length) + ' blank Browser tab(s) of this conversation'
+                + (closed.length > 0 ? ': ' + closed.join(', ') : ' (none were blank).')
+                + '\n' + (browserTabs(ctx, mine).rows.length === 0
+                  ? 'No Browser tab is left for this conversation; use action "open" with a url.'
+                  : String(browserTabs(ctx, mine).rows.length) + ' tab(s) remain.'),
+            }
+          }
+          const visible = args.all === true ? all : rows
+          if (visible.length === 0) {
+            return { text: 'No Browser tab is open for this conversation'
+              + (all.length > 0 ? ' (' + String(all.length) + ' Browser tab(s) belong to other conversations; pass all:true to list them).' : '')
+              + ' Use action "open" with a url.' }
           }
           const activeId = active === undefined || active === null ? undefined : String(active.id)
-          const lines = rows.map((tab) => {
+          const onScreen = currentSessionId(ctx)
+          const lines = visible.map((tab) => {
             const id = String(tab.tabId ?? tab.id ?? '')
             const holder = id === '' ? undefined : frameForTab({ id })
             const url = String(tab.url ?? tab.address ?? (holder === undefined ? '' : safe(() => holder.getURL())) ?? '')
-            const title = String(tab.title ?? tab.label ?? (holder === undefined ? '' : safe(() => holder.getTitle())) ?? '')
+            const title = String((tab.title ?? tab.label ?? (holder === undefined ? '' : safe(() => holder.getTitle()))) || '')
+            const mineTab = tab.sessionId === undefined || tab.sessionId === mine
             const mark = activeId !== undefined && (activeId === id || activeId === String(tab.id ?? '')) ? '*' : ' '
-            return mark + ' ' + id + '  ' + title + '  ' + url
+            const owner = mineTab ? 'this chat' : 'chat ' + shortSession(tab.sessionId)
+              + (tab.sessionId === onScreen ? ' (on screen)' : '')
+            const blank = url === '' || url === 'about:blank' || /^about:blank#/.test(url)
+            const shown = blank ? '(blank)' : (title.length > 0 ? title : '(untitled)')
+            return [mark, id, '[' + owner + ']', shown, blank ? '' : url].filter((part) => part !== '').join('  ')
           })
-          const hidden = all.length - rows.length
+          const blankCount = rows.filter((tab) => {
+            const id = String(tab.tabId ?? tab.id ?? '')
+            const holder = id === '' ? undefined : frameForTab({ id })
+            const url = String(tab.url ?? tab.address ?? (holder === undefined ? '' : safe(() => holder.getURL())) ?? '')
+            return url === '' || url === 'about:blank' || /^about:blank#/.test(url)
+          }).length
+          const others = all.length - rows.length
           return {
-            text: 'Browser tabs (' + String(rows.length) + ', * = active):\n' + lines.join('\n')
-              + (hidden > 0 ? '\n(' + String(hidden) + ' more belong to other Sessions and are hidden here.)' : ''),
+            text: 'Browser tabs (' + String(visible.length) + ', * = active, [owner] = conversation):\n' + lines.join('\n')
+              + (blankCount > 0 ? '\n(' + String(blankCount) + ' blank tab(s) in this conversation; pass prune:true to close them.)' : '')
+              + (args.all === true
+                ? (others > 0 ? '\n(' + String(others) + ' tab(s) above belong to other conversations; this tool never drives them.)' : '')
+                : (others > 0 ? '\n(' + String(others) + ' more belong to other conversations and are hidden; pass all:true to list them.)' : '')),
           }
         }
         case 'focus': {
           const side = sidebarRightOf(ctx)
           if (side === undefined || side === null) throw new Error('The right Sidebar is unavailable in this Harness page.')
-          const target = findBrowserTab(ctx, args.tab_id)
-          side.focus(target.tabId ?? target.id)
+          const mine = callerSessionId(state, ctx)
+          const target = findBrowserTab(ctx, args.tab_id, mine)
+          const targetId = String(target.tabId ?? target.id)
+          /* Focusing a tab of a conversation that is not on screen would need a
+             Session switch; say that instead of silently focusing nothing. */
+          if (target.sessionId !== undefined && target.sessionId !== currentSessionId(ctx)) {
+            throw new Error('Browser tab ' + JSON.stringify(targetId) + ' belongs to chat ' + shortSession(target.sessionId)
+              + ', which is not the conversation on screen, so it cannot be focused from here. '
+              + 'Switch to that conversation, or open your own tab with action "open".')
+          }
+          side.focus(targetId)
           await sleep(250)
-          return { text: 'Focused Browser tab ' + String(target.tabId ?? target.id) + '.\n' + statusText(ctx) }
+          return { text: 'Focused Browser tab ' + targetId + '.\n' + statusText(ctx, mine) }
         }
         case 'close_tab': {
           const side = sidebarRightOf(ctx)
           if (side === undefined || side === null) throw new Error('The right Sidebar is unavailable in this Harness page.')
-          const target = findBrowserTab(ctx, args.tab_id)
-          side.close(target.tabId ?? target.id)
+          const mine = callerSessionId(state, ctx)
+          const target = findBrowserTab(ctx, args.tab_id, mine)
+          const targetId = String(target.tabId ?? target.id)
+          const owner = target.sessionId ?? mine
+          if (owner !== undefined && typeof side.closeIn === 'function') side.closeIn(owner, targetId)
+          else side.close(targetId)
           state.last = undefined
-          return { text: 'Closed Browser tab ' + String(target.tabId ?? target.id) + '.' }
+          return { text: 'Closed Browser tab ' + targetId + '.' }
         }
         case 'click': {
           const before = activeBrowserTab(ctx)
@@ -1637,36 +1777,52 @@ window.__ModuleLoader__.load({
             throw new Error(message)
           }
           const text = JSON.stringify(outcome.value, null, 2)
+          if (outcome.value === null || outcome.value === undefined) {
+            /* A mutation-only script legitimately returns nothing; say so rather
+               than printing a bare "null" that looks like a failure. */
+            return {
+              text: 'The script ran and returned nothing (null). '
+                + 'Add a value — for example `{ ok: true }` or the element you changed — to read the result.',
+            }
+          }
           return { text: text.length > 20000 ? text.slice(0, 20000) + '\n(truncated)' : text }
         }
         case 'screenshot': {
-          await revealFrame(ctx, frame)
+          await revealForCapture(ctx, frame)
           const maxWidth = Number(args.max_width) > 0 ? Number(args.max_width) : undefined
           if (args.full_page === true) {
             const image = await captureFullPage(frame, maxWidth)
             const note = image.truncated === true ? 'The page is taller than 20,000 px; captured the top part.\n' : ''
             return {
-              text: note + 'Captured the full Browser page (' + String(image.width) + '×' + String(image.height) + ').\n' + statusText(ctx),
+              text: note + 'Captured the full Browser page (' + String(image.width) + '×' + String(image.height) + ').\n' + statusText(ctx, callerSessionId(state, ctx)),
               png: image,
             }
           }
           const image = await capture(frame, maxWidth)
           return {
-            text: 'Captured the visible Browser page (' + String(image.width) + '×' + String(image.height) + ').\n' + statusText(ctx),
+            text: 'Captured the visible Browser page (' + String(image.width) + '×' + String(image.height) + ').\n' + statusText(ctx, callerSessionId(state, ctx)),
             png: image,
           }
         }
         case 'close': {
           const sidebarRight = sidebarRightOf(ctx)
           if (sidebarRight === undefined || sidebarRight === null) throw new Error('The right Sidebar is unavailable in this Harness page.')
-          const tab = safe(() => sidebarRight.active())
-          if (tab !== undefined && tab !== null && tab.kind === 'browser' && tab.id !== undefined && tab.id !== null) {
-            sidebarRight.close(tab.id)
+          const mine = callerSessionId(state, ctx)
+          /* Close this conversation's own Browser tab, not whatever happens to be
+             in front: a person reading another conversation must not lose their
+             page because a background chat asked to close "the" tab. */
+          const { rows } = browserTabs(ctx, mine)
+          const active = safe(() => sidebarRight.active())
+          const activeId = active === undefined || active === null ? undefined : String(active.id)
+          const own = rows.find((tab) => String(tab.tabId ?? tab.id ?? '') === activeId) ?? rows[rows.length - 1]
+          if (own !== undefined) {
+            const id = String(own.tabId ?? own.id)
+            const owner = own.sessionId ?? mine
+            if (owner !== undefined && typeof sidebarRight.closeIn === 'function') sidebarRight.closeIn(owner, id)
+            else sidebarRight.close(id)
             state.last = undefined
-            return { text: 'Closed Browser tab ' + String(tab.id) + '.' }
+            return { text: 'Closed Browser tab ' + id + '.' }
           }
-          // The Browser tab may sit behind another tab or in a Session that is no longer
-          // on screen; close the tab that owns our frame instead of the visible one.
           const frame = pickFrame(state, ctx)
           const info = frame === undefined ? undefined : frameTabInfo(ctx, frame)
           if (info !== undefined && info.frameSession !== undefined && info.tabId !== undefined
@@ -1679,8 +1835,7 @@ window.__ModuleLoader__.load({
               throw new Error('Could not close the Browser tab: ' + (error instanceof Error ? error.message : String(error)))
             }
           }
-          if (tab !== undefined && tab !== null) throw new Error('The active right-Sidebar tab is "' + String(tab.kind) + '", not a Browser tab.')
-          throw new Error('There is no active right-Sidebar tab to close.')
+          throw new Error('This conversation has no Browser tab to close. Use action "tabs" to see which tabs exist.')
         }
         case 'batch': {
           const steps = Array.isArray(args.steps) ? args.steps.slice(0, 12) : []
@@ -1781,7 +1936,16 @@ window.__ModuleLoader__.load({
                    is a readable client message instead of a host timeout. */
                 const budget = Number(command.deadlineMs) > 0 ? Number(command.deadlineMs) : DEFAULT_ACTION_BUDGET_MS
                 const closed = Math.max(5000, Math.min(budget - 5000, MAX_ACTION_BUDGET_MS))
-                message = { ok: true, value: await withDeadline(executeCommand(state, command), closed, 'The action "' + String(command.action) + '"') }
+                /* The command carries the Session that called the tool; every
+                   tab operation is scoped to it so parallel conversations stop
+                   sharing one tab strip. */
+                const previousCaller = state.caller
+                state.caller = typeof command.sessionId === 'string' && command.sessionId.length > 0 ? command.sessionId : undefined
+                try {
+                  message = { ok: true, value: await withDeadline(executeCommand(state, command), closed, 'The action "' + String(command.action) + '"') }
+                } finally {
+                  state.caller = previousCaller
+                }
               } catch (error) {
                 message = {
                   ok: false,
