@@ -95,7 +95,7 @@ const PARAMETERS = {
     },
     new_tab: {
       type: 'boolean',
-      description: 'For "open": create a new Browser tab instead of navigating the visible one.',
+      description: 'For "open": create a new Browser tab in this Session instead of reusing its current Browser page.',
     },
     modifiers: {
       type: 'array',
@@ -204,7 +204,8 @@ passages that answer it, and \`diff\` returns only what changed since the previo
 than another snapshot. When a task needs several steps (open → fill → submit → read), put them in one
 \`batch\` call instead of one tool call per step. Use \`tabs\` to see several Browser tabs and
 \`focus\`/\`close_tab\` with their ids.
-\`open\` reuses the visible tab by default (pass \`new_tab\` for a separate tab) and accepts http(s), file,
+Browser actions are scoped to the calling Session. Bring it on screen to open a new tab, focus a tab, or take a screenshot.
+\`open\` reuses the current Browser page when available (pass \`new_tab\` for a separate tab) and accepts http(s), file,
 about:blank, absolute paths from the current page and about:blank URLs. \`type\` verifies that the field accepted
 the text and submits the enclosing form, or presses Enter when there is none. \`press\` takes \`modifiers\`
 (ctrl/alt/shift/meta) for shortcuts. \`select\` matches by option value, label or 0-based \`index\` and fails clearly
@@ -617,6 +618,10 @@ export function apply(ctx) {
     async execute(rawArgs, exec) {
       const args = pickArgs(rawArgs)
       validate(args.action, args)
+      const sessionId = exec.agent?.session.id
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        throw new Error('Sidebar Browser Control needs a calling Harness Session.')
+      }
       await ensureClient(exec)
       const requested = Number.isFinite(args.timeout_ms) ? args.timeout_ms : undefined
       const timeoutMs = args.action === 'wait'
@@ -624,7 +629,7 @@ export function apply(ctx) {
         : args.action === 'screenshot'
           ? Math.min(requested ?? (args.full_page === true ? 60000 : 30000), 75000)
           : (requested ?? DEFAULT_TIMEOUT_MS)
-      const command = { id: randomUUID(), action: args.action, args, deadlineMs: timeoutMs }
+      const command = { id: randomUUID(), sessionId, action: args.action, args, deadlineMs: timeoutMs }
       const raw = await dispatch(command, exec, timeoutMs)
       const value = { text: typeof raw?.text === 'string' ? raw.text : JSON.stringify(raw) }
       if (args.action === 'screenshot') {
