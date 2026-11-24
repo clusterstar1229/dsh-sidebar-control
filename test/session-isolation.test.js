@@ -8,7 +8,7 @@ import { apply } from '../index.js'
 
 const clientSource = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 
-function harness(t, { foreground = 'B' } = {}) {
+function harness(t, { foreground = 'B', retained = [] } = {}) {
   const routes = new Map()
   let tool
   apply({
@@ -62,9 +62,14 @@ function harness(t, { foreground = 'B' } = {}) {
     openTabs: { getSnapshot: () => tabs },
     active: () => ({ kind: 'browser', id: activeIds.get(foreground) }),
     isExpanded: () => expanded,
-    openTab(_kind, { params }) {
-      actions.push(['open', foreground])
-      addTab(foreground, 'tab2', params.url)
+    openTab(kind, options) {
+      side.openTabIn(foreground, kind, options)
+    },
+    openTabIn(sessionId, _kind, { params }) {
+      if (sessionId !== foreground && !retained.includes(sessionId)) return
+      actions.push(['open', sessionId])
+      const frame = addTab(sessionId, 'tab2', params.url)
+      frame.isConnected = sessionId === foreground
       side.onOpen?.()
     },
     focus(tabId) {
@@ -117,7 +122,7 @@ function harness(t, { foreground = 'B' } = {}) {
     AbortController, URL, console, fetch, setTimeout, clearTimeout,
     document: {
       baseURI: 'http://harness.test/',
-      querySelectorAll: () => frames,
+      querySelectorAll: () => frames.filter((frame) => frame.isConnected),
       querySelector: () => frames[0] ?? null,
     },
     window: {
@@ -159,11 +164,25 @@ test('a background caller only sees and changes its own tabs, even when tab IDs 
   assert.equal(a.getURL(), 'https://a.test/next')
   await assert.rejects(h.call('A', 'close_tab', { tab_id: 'tab-b' }), /No Browser tab/)
   await assert.rejects(h.call('A', 'focus', { tab_id: 'tab1' }), /Bring the calling Harness Session on screen/)
-  await assert.rejects(h.call('A', 'open', { url: 'https://a.test/', new_tab: true }), /Bring the calling Harness Session on screen/)
+  for (const options of [{}, { new_tab: true }]) {
+    // The plain open reaches the new-tab path when the caller has no webview.
+    await assert.rejects(h.call('C', 'open', { url: 'https://c.test/', ...options }), /Bring the calling Harness Session on screen/)
+  }
   await assert.rejects(h.call('A', 'screenshot'), /Bring the calling Harness Session on screen/)
   await h.call('A', 'close')
   assert.equal(b.getURL(), 'https://b.test/')
   assert.deepEqual(h.actions, [['navigate', 'A', 'tab1'], ['close', 'A', 'tab1']])
+})
+
+test('plain open creates a tab in the retained background caller without opening it in the foreground', async (t) => {
+  const h = harness(t, { retained: ['A'] })
+  const b = h.addTab('B', 'tab2', 'https://b.test/')
+  const { text } = await h.call('A', 'open', { url: 'https://a.test/new' })
+  assert.match(text, /Created Browser tab tab2 for https:\/\/a\.test\/new/)
+  assert.doesNotMatch(text, /https:\/\/b\.test\//)
+  assert.match((await h.call('A', 'tabs')).text, /  tab2 /)
+  assert.deepEqual(h.actions, [['open', 'A']])
+  assert.equal(b.getURL(), 'https://b.test/')
 })
 
 test('a missing caller or an unowned frame cannot fall back to the foreground browser', async (t) => {

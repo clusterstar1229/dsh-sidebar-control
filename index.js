@@ -14,8 +14,9 @@ import { randomUUID } from 'node:crypto'
 export const name = 'sidebar-control'
 export const inject = ['tools', 'connection', 'webServer', 'systemPrompt']
 
-const POLL_PATH = '/sidebar-control/poll'
-const RESULT_PATH = '/sidebar-control/result'
+// A pre-isolation client must never receive commands for a specific Session.
+const POLL_PATH = '/sidebar-control/v2/poll'
+const RESULT_PATH = '/sidebar-control/v2/result'
 const CLIENT_WAIT_LIMIT_MS = 25000
 const CLIENT_FRESH_MS = 45000
 const DEFAULT_TIMEOUT_MS = 90000
@@ -204,7 +205,8 @@ passages that answer it, and \`diff\` returns only what changed since the previo
 than another snapshot. When a task needs several steps (open → fill → submit → read), put them in one
 \`batch\` call instead of one tool call per step. Use \`tabs\` to see several Browser tabs and
 \`focus\`/\`close_tab\` with their ids.
-Browser actions are scoped to the calling Session. Bring it on screen to open a new tab, focus a tab, or take a screenshot.
+Browser actions are scoped to the calling Session. A new tab can open in the background when Harness still has
+that Sidebar mounted. Bring the Session on screen if needed to open a tab, focus a tab, or take a screenshot.
 \`open\` reuses the current Browser page when available (pass \`new_tab\` for a separate tab) and accepts http(s), file,
 about:blank, absolute paths from the current page and about:blank URLs. \`type\` verifies that the field accepted
 the text and submits the enclosing form, or presses Enter when there is none. \`press\` takes \`modifiers\`

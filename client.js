@@ -716,8 +716,8 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function browserFrames(sessionId) {
-      return Array.from(document.querySelectorAll(FRAME_SELECTOR)).filter((frame) =>
+    function browserFrames(sessionId, selector = FRAME_SELECTOR) {
+      return Array.from(document.querySelectorAll(selector)).filter((frame) =>
         frame.closest('[data-sidebar-right-session]')?.getAttribute('data-sidebar-right-session') === sessionId)
     }
 
@@ -782,10 +782,13 @@ window.__ModuleLoader__.load({
     }
 
     async function openBrowserTab(side, sessionId, url) {
-      requireSessionOnScreen(side, sessionId, 'open a new Browser tab')
+      const canOpenInSession = typeof side.openTabIn === 'function'
+      if (!canOpenInSession) requireSessionOnScreen(side, sessionId, 'open a new Browser tab')
       const previousIds = new Set(browserTabs(side, sessionId).map((tab) => tab.tabId))
       try {
-        side.openTab('browser', { params: { url } })
+        const options = { params: { url } }
+        if (canOpenInSession) side.openTabIn(sessionId, 'browser', options)
+        else side.openTab('browser', options)
       } catch (error) {
         throw new Error('Could not open the right-Sidebar Browser: ' + (error instanceof Error ? error.message : String(error)))
       }
@@ -793,6 +796,7 @@ window.__ModuleLoader__.load({
       // The controller updates tab membership synchronously. Pin readiness to
       // this tab even if a different tab or Session becomes active while loading.
       const opened = browserTabs(side, sessionId).filter((tab) => !previousIds.has(tab.tabId))
+      if (opened.length === 0) requireSessionOnScreen(side, sessionId, 'open a new Browser tab')
       if (opened.length !== 1) throw new Error('Could not identify the new Browser tab in the calling Session.')
       const tabId = opened[0].tabId
       const deadline = Date.now() + 30000
@@ -802,7 +806,7 @@ window.__ModuleLoader__.load({
         if (address && (address === url || !address.startsWith('about:blank')) && safe(() => frame.isLoading()) !== true) {
           try {
             const ready = await frame.executeJavaScript('document.readyState', true)
-            if (ready === 'complete' || ready === 'interactive') return { frame, tabId }
+            if (ready === 'complete' || ready === 'interactive') return { tabId }
           } catch {
             // The guest can still be between documents.
           }
@@ -810,6 +814,9 @@ window.__ModuleLoader__.load({
         if (!browserTabs(side, sessionId).some((tab) => tab.tabId === tabId)) {
           throw new Error('The new Browser tab was closed while loading.')
         }
+        if (!sessionIsOnScreen(side, sessionId)) return { tabId, background: true }
+        const iframe = frameForTab(browserFrames(sessionId, 'iframe[data-sidebar-browser-frame]'), tabId)
+        if (iframe !== undefined) return { tabId, iframe: true }
         await sleep(150)
       }
       throw new Error('Browser tab ' + tabId + ' did not finish loading. Bring the calling Harness Session on screen and check the tab.')
@@ -1298,10 +1305,12 @@ window.__ModuleLoader__.load({
           return { text: 'Opened ' + url + '\n' + statusText(side, sessionId) }
         }
         const opened = await openBrowserTab(side, sessionId, url)
-        rememberFrame(state, sessionId, opened.frame)
-        return {
-          text: 'Opened ' + url + ' in Browser tab ' + opened.tabId + '\n' + statusText(side, sessionId),
-        }
+        state.lastTabs.set(sessionId, opened.tabId)
+        const tab = ' in Browser tab ' + opened.tabId
+        const message = opened.background
+          ? 'Created Browser tab ' + opened.tabId + ' for ' + url + '. Bring the calling Session on screen to use the page.'
+          : (opened.iframe ? 'Requested ' : 'Opened ') + url + tab
+        return { text: message + '\n' + statusText(side, sessionId) }
       }
 
       /* Sidebar-only actions must work even when the visible right-Sidebar tab is
@@ -1647,7 +1656,7 @@ window.__ModuleLoader__.load({
       const generation = (globalThis.__dshScGeneration = (globalThis.__dshScGeneration || 0) + 1)
 
       async function post(name, payload, signal) {
-        const url = new URL('sidebar-control/' + name, document.baseURI)
+        const url = new URL('sidebar-control/v2/' + name, document.baseURI)
         const response = await fetch(url, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
