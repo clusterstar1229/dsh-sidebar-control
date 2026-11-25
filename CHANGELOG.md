@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.2.3 — 2026-11-25
+## 0.2.3 — 2026-11-25 — **emergency fix**
+
+**This is an emergency release.** In 0.2.2, several conversations driving the sidebar at the same time shared
+one tab strip: a background conversation's `open` created its tab in the conversation that happened to be on
+screen, and `tabs` / `focus` / `close_tab` / `close` could move or close another conversation's page. That is
+data-loss-adjacent behaviour for anyone running more than one chat, so it ships as a fix release rather than
+waiting for the next feature cycle.
 
 Tabs are now owned by the conversation that opened them, plus three usability fixes found while testing the
 same flows. Live evidence: [`test/campaign-0.2.3.md`](test/campaign-0.2.3.md).
