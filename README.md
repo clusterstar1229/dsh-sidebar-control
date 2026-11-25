@@ -131,7 +131,7 @@ This package is that something. It registers exactly one model-facing tool, and 
 
 | Version | Date | What this version solved |
 |---|---|---|
-| **0.2.3** | 2026-11-22 | **Tabs belong to the conversation that opened them.** Parallel conversations used to share one tab strip: `open` created tabs in whichever Session was on screen, so a background chat dropped its tab into the chat you were reading, and `tabs` / `focus` / `close_tab` / `close` could reach across conversations. Tabs are now written into the calling Session's own layout (`openTabIn`), every tab operation is scoped to the caller, `tabs` labels each row with its owner (`[this chat]` / `[chat 7a3c11]`), `tabs { all: true }` shows other conversations read-only, and `tabs { prune: true }` closes only this conversation's blank tabs. Also: a failed screenshot now suggests `snapshot` / `read` instead of a dead end, `eval` says when a script ran but returned nothing, and `status` reports the tab split plus the calling Session. |
+| **0.2.3** | 2026-11-25 | **Tabs belong to the conversation that opened them.** Parallel conversations used to share one tab strip: `open` created tabs in whichever Session was on screen, so a background chat dropped its tab into the chat you were reading, and `tabs` / `focus` / `close_tab` / `close` could reach across conversations. Tabs are now written into the calling Session's own layout (`openTabIn`), frames are resolved per Session, every tab operation is scoped to the caller, opening a tab in the background is allowed while `focus` / `screenshot` say when the caller must be on screen, `tabs` labels each row with its owner (`[this chat]` / `[chat 7a3c11]`), `tabs { all: true }` shows other conversations read-only, and `tabs { prune: true }` closes only this conversation's blank tabs. Also: a failed screenshot now suggests `snapshot` / `read` instead of a dead end, `eval` says when a script ran but returned nothing, and `status` reports the tab split. *Includes the community fix from [#1](https://github.com/clusterstar1229/dsh-sidebar-control/pull/1) (@k99k5), which landed with six `node --test` regression tests.* |
 | 0.2.2 | 2026-11-16 | **Interaction and layout coverage.** `hover` opens menus and tooltips before a click; `snapshot` / `read` / `click` / `type` / `scroll` / `wait` now traverse **open shadow roots**, and shadow text is filtered to visible content; `screenshot` gains `full_page` (stitched viewport tiles) and `max_width`; `select` accepts a 0-based `index`; `type` gains `clear: false` to append; `open` / `navigate` accept page-relative paths; `read` splits a single-line page into sentence chunks and falls back to the page opening when nothing matches; `batch` accepts `hover`. |
 | 0.2.1 | 2026-11-08 | **Live-campaign hardening.** A 110-action run against the real panel found 20 defects; this release fixes them. *Correctness:* `select` fails on an unknown option instead of blanking the control, `scroll` honours `selector` and axis, `wait` requires a visible element, `eval` accepts statements and serialises real data, `click` focuses text fields, `type` verifies the stored value. *Safety:* `open` / `tabs` / `focus` / `close_tab` are Session-scoped, and stale snapshot refs are cleared. *Reliability:* client deadlines follow the requested timeout (long waits no longer break), a busy page is no longer reported as disconnected, `batch` validates every step and reports `ran N of M`, oversized screenshots are downscaled, and results now state their size (`chars ≈ tokens`). |
 | 0.1.3 | 2026-11-07 | First stable public release on npm and GitHub: sidebar Browser control with snapshot refs, `click` / `type` / `press` / `select` / `scroll`, query-scoped `read` (BM25 over Latin words + CJK bigrams), `diff`, `batch`, multi-tab management and screenshots. Superseded by 0.2.x for daily use. |
@@ -300,6 +300,7 @@ Fixed headers repeat in the stitched image, and `max_width` keeps a very long ca
 
 ```bash
 npm run check                 # node --check on both halves
+npm test                      # node --test: session-isolation regressions
 python -m http.server 8799 --bind 127.0.0.1 --directory test   # fixture pages
 ```
 
@@ -421,7 +422,7 @@ DSH 0.2.2-rc.5 自带右栏 Browser 这个**界面**：标签宿主 + Electron `
 
 | 版本 | 日期 | 这个版本解决了什么 |
 |---|---|---|
-| **0.2.3** | 2026-11-22 | **标签归属于开启它的对话。** 以前多个对话共用一条标签栏：`open` 把标签建在「屏幕上那个会话」的布局里，于是后台对话的标签会掉进你正在读的对话里，`tabs` / `focus` / `close_tab` / `close` 也可能跨对话操作。现在标签写入调用方会话自己的布局（`openTabIn`），所有标签操作按调用方隔离，`tabs` 每行标注归属（`[this chat]` / `[chat 7a3c11]`），`tabs { all: true }` 只读列出其他对话，`tabs { prune: true }` 只清理本对话的空白标签。此外：截图失败会提示改用 `snapshot` / `read`，`eval` 脚本无返回值时会说明已执行，`status` 会报告本对话/其他对话的标签数与调用会话。 |
+| **0.2.3** | 2026-11-25 | **标签归属于开启它的对话。** 以前多个对话共用一条标签栏：`open` 把标签建在「屏幕上那个会话」的布局里，于是后台对话的标签会掉进你正在读的对话里，`tabs` / `focus` / `close_tab` / `close` 也可能跨对话操作。现在标签写入调用方会话自己的布局（`openTabIn`），所有标签操作按调用方隔离，`tabs` 每行标注归属（`[this chat]` / `[chat 7a3c11]`），`tabs { all: true }` 只读列出其他对话，`tabs { prune: true }` 只清理本对话的空白标签。此外：截图失败会提示改用 `snapshot` / `read`，`eval` 脚本无返回值时会说明已执行，`status` 会报告本对话/其他对话的标签数。*含社区贡献的修复 [#1](https://github.com/clusterstar1229/dsh-sidebar-control/pull/1)（@k99k5），随附 6 项 `node --test` 回归测试。* |
 | 0.2.2 | 2026-11-16 | **交互与版面覆盖。** 新增 `hover`，可先打开悬停菜单/提示再点击；`snapshot` / `read` / `click` / `type` / `scroll` / `wait` 现在会遍历**开放的 shadow root**，且 shadow 文本只收集可见内容；`screenshot` 支持 `full_page`（分块拼接整页）和 `max_width`；`select` 支持从 0 开始的 `index`；`type` 支持 `clear: false` 追加；`open` / `navigate` 支持相对路径；`read` 会把单行长页拆成句子块，并在无命中时回退显示页面开头；`batch` 支持 `hover`。 |
 | 0.2.1 | 2026-11-08 | **现场实战加固。** 在真实面板上跑了 110 步自动化，发现 20 个缺陷并全部修复。*正确性：*`select` 选不存在的值会明确报错而不是清空控件，`scroll` 支持 `selector` 与单一滚动轴，`wait` 只认可见元素，`eval` 支持语句块并返回可读数据，`click` 会聚焦输入框，`type` 会校验实际写入值。*安全性：*`open` / `tabs` / `focus` / `close_tab` 按会话隔离，快照旧 ref 会被清除。*可靠性：*客户端超时跟随请求的 timeout（长等待不再断），忙状态不再被误报为页面未连接，`batch` 会先校验步骤并报告 `ran N of M`，超大截图自动降采样，结果会标注 `chars ≈ tokens`。 |
 | 0.1.3 | 2026-11-07 | 首个 npm / GitHub 正式公开版本：侧栏 Browser 控制、快照 refs、`click` / `type` / `press` / `select` / `scroll`、按问题检索的 `read`（英文词 + 中文二元组 BM25）、`diff`、`batch`、多标签与截图。日常使用请升级到 0.2.x。 |
@@ -573,6 +574,7 @@ builtin_browser({ action: "screenshot", full_page: true, max_width: 1200 })
 
 ```bash
 npm run check                 # 对 host/client 两半做 node --check
+npm test                      # node --test：会话隔离回归
 python -m http.server 8799 --bind 127.0.0.1 --directory test   # 测试 fixture
 ```
 

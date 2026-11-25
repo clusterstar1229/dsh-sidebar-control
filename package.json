@@ -71,6 +71,7 @@
   ],
   "scripts": {
     "check": "node --check index.js && node --check client.js",
-    "prepack": "npm run check"
+    "prepack": "npm run check",
+    "test": "node --test test/*.test.js"
   }
 }

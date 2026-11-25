@@ -1,41 +1,52 @@
 # Changelog
 
-## 0.2.3 — 2026-11-22
+## 0.2.3 — 2026-11-25
 
 Tabs are now owned by the conversation that opened them, plus three usability fixes found while testing the
 same flows. Live evidence: [`test/campaign-0.2.3.md`](test/campaign-0.2.3.md).
 
+*This release includes the community fix from [#1](https://github.com/clusterstar1229/dsh-sidebar-control/pull/1)
+by @k99k5 ("修复侧边栏浏览器跨会话操作的问题"), which brought the caller-Session plumbing, per-Session frame
+resolution, on-screen guards and the six `node --test` regression tests. The tab-owner labels, `prune`, the
+screenshot hint and the `eval` message below are this release's own work on top of it.*
+
 ### Fixed — conversations no longer share one tab strip
 
-- `open` created Browser tabs in **the Session that was on screen** (`sidebarRight.openTab` resolves the mounted
-  Session internally), so any background conversation's tab landed in whatever conversation the person was
-  reading, and every conversation's strip filled with everyone else's tabs. Tabs are now created inside the
-  calling Session's own layout through `openTabIn(sessionId, …)`, and the reply says which conversation owns the
-  result (or warns when this Harness page has no live layout for it and the tab had to fall back to the
-  on-screen one).
-- The host now stamps every command with the calling agent's Session id (`exec.agent.id`), and the client keeps
-  it for the duration of that command — the tool no longer has to guess which conversation is asking.
+- `open` created Browser tabs in **the Session that was on screen**, so a background conversation's tab landed
+  in whatever conversation the person was reading, and every conversation's strip filled with everyone else's
+  tabs. Tabs are now created inside the calling Session's own layout through `openTabIn(sessionId, …)`.
+- The host stamps every command with the calling Session id (`exec.agent.session.id`, falling back to
+  `exec.agent.id`), and the client resolves Browser frames per Session, so a command can never fall back to the
+  foreground conversation's page.
+- `open` works from a background conversation; `focus` and `screenshot` explain that the calling conversation
+  has to be on screen rather than silently acting on another one.
 - `tabs` lists this conversation's tabs and labels each row `[this chat]` / `[chat 7a3c11]`; `tabs { all: true }`
   additionally lists other conversations read-only, saying explicitly that they are never driven.
-- `focus` and `close_tab` resolve through the caller's tab list only: touching another conversation's tab now
-  fails with the owner's Session id instead of moving or closing it.
-- `close` closes this conversation's own Browser tab (the active one when it belongs here, otherwise the last
-  one that does) instead of whatever right-Sidebar tab happens to be in front.
+- `focus` and `close_tab` resolve through the caller's tab list only: touching another conversation's tab fails
+  with `No Browser tab … is open for this Session: it belongs to another conversation (Session …)`.
+- `close` closes this conversation's own Browser tab instead of whatever right-Sidebar tab is in front.
 
 ### Added
 
 - `tabs { prune: true }` closes the blank tabs (`about:blank`, never loaded) that one conversation accumulated;
-  other conversations are untouched. Long chats no longer keep a dozen empty tabs.
-- `status` reports `callingSession`, `onScreenSession` and `tabs: N in this conversation, M in other
-  conversations`, so the isolation can be checked in one call.
+  other conversations are untouched. A tab whose frame is not mounted is never pruned, because it cannot be
+  inspected.
+- `status` reports `tabs: N in this conversation, M in other conversations`, so the isolation can be checked in
+  one call.
 
 ### Fixed — usability
 
-- A screenshot of a hidden tab used to end in a bare "would be blank" error; it now suggests `snapshot` / `read`
-  (which need no visible panel) in the same message, so the model can recover without retrying blindly.
+- A screenshot of a hidden tab used to end in a bare "hidden" error; it now suggests `snapshot` / `read` (which
+  need no visible panel) in the same message.
 - `eval` printed a bare `null` when a mutation-only script returned nothing; it now says the script ran and
-  suggests returning a value to read the result.
-- `tabs` renders blank tabs as `(blank)` instead of an empty title column, and reports how many there are.
+  suggests returning a value.
+- `tabs` renders blank tabs as `(blank)` and uninspectable ones as `(untitled)` instead of an empty column.
+
+### Tests
+
+- `npm test` runs `test/session-isolation.test.js`: six simulated regressions covering duplicate tab ids across
+  conversations, a background caller, a missing caller, foreground switches mid-batch, a tab loading across a
+  switch, and screenshot reveal after a switch.
 
 ## 0.2.2 — 2026-11-16
 
